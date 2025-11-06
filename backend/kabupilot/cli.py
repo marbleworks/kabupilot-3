@@ -18,7 +18,7 @@ from .agents import (
 )
 from .config import get_database_path
 from .db import initialize_database
-from .knowledge import load_knowledge_base
+from .knowledge import ensure_seed_knowledge, load_knowledge_base
 from .models import WatchlistEntry
 from .repository import PortfolioRepository
 
@@ -31,9 +31,11 @@ def cmd_init_db(args: argparse.Namespace) -> None:
     db_path = initialize_database(args.db_path, force=args.force)
     repository = _create_repository(db_path)
 
+    ensure_seed_knowledge(database_path=db_path)
+
     # Seed watchlist from the knowledge base to help the Explorer agent.
     market = repository.get_market()
-    knowledge = load_knowledge_base(market)
+    knowledge = load_knowledge_base(market, database_path=db_path)
     repository.replace_watchlist(
         WatchlistEntry(entry.symbol, f"Seed from knowledge base ({entry.sector})")
         for entry in knowledge[:5]
@@ -85,7 +87,7 @@ def cmd_run_planner(args: argparse.Namespace) -> None:
 def cmd_run_daily(args: argparse.Namespace) -> None:
     repository = _create_repository(args.db_path)
     market = repository.get_market()
-    knowledge = load_knowledge_base(market)
+    knowledge = load_knowledge_base(market, database_path=args.db_path)
     explorer = ExplorerAgent(repository, knowledge)
     researcher = ResearcherAgent(knowledge)
     leader = ResearchLeaderAgent(researcher)
@@ -119,7 +121,7 @@ def cmd_set_market(args: argparse.Namespace) -> None:
     repository.set_market(args.market)
 
     if args.refresh_watchlist:
-        knowledge = load_knowledge_base(args.market)
+        knowledge = load_knowledge_base(args.market, database_path=args.db_path)
         repository.replace_watchlist(
             WatchlistEntry(entry.symbol, f"Seed from knowledge base ({entry.sector})")
             for entry in knowledge[:5]

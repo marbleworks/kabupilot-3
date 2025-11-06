@@ -136,6 +136,7 @@ AIエージェントが自動で株式ポートフォリオを運用する Web �
 
 * インターフェース：各エージェントの入出力は JSON で統一
 * ログ：全工程で活動記録（誰が・何を・なぜ）を残し、Checker が学習（KB 更新）に活用
+* ナレッジベース：SQLite（`knowledge_entries` テーブル）で市場別インサイトを管理し、エージェント間で共有・追記する
 * 意思決定の流れ：Explorer（候補抽出） → Researcher/Leader（評価） → Decider（配分・更新） → PortfolioUpdater（実行） → Checker（評価・学習）
 
 ## 8. 時系列（テキスト図）

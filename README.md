@@ -41,6 +41,12 @@ pip install -r requirements.txt  # まだ requirements は不要ですが仮の�
    python -m kabupilot.cli show-portfolio
    ```
 
+### ナレッジベースについて
+
+* ナレッジベースは `kabupilot.db` の `knowledge_entries` テーブルに保存されます。
+* `init-db` 実行時に各市場向けの初期インサイトが投入され、以降はエージェントが参照・追記します。
+* CLI コマンドは常に SQLite 上のナレッジを参照し、ウォッチリストの初期化や調査スコアリングに活用します。
+
 ### 市場設定の切り替え
 
 設定値は SQLite データベースに保存されます。デフォルトは日本株（`jp`）です。
