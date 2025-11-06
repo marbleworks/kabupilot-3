@@ -13,7 +13,16 @@ cd backend
 pip install -r requirements.txt  # まだ requirements は不要ですが仮の手順です
 ```
 
-`requirements.txt` には yfinance が含まれており、実際の株価を取得するために利用します。
+`requirements.txt` には yfinance のほか OpenAI / xAI API を呼び出すためのクライアントライブラリ（`openai`、`requests`）が含まれています。
+実際に LLM を利用する場合は以下の環境変数を設定してください。
+
+| 変数名 | 説明 |
+| --- | --- |
+| `OPENAI_API_KEY` | OpenAI (GPT) の API キー。|
+| `XAI_API_KEY` | xAI Grok API の API キー。|
+| `XAI_BASE_URL` | 任意。自前のプロキシなど別エンドポイントを利用する場合に上書きします。|
+
+いずれも `export OPENAI_API_KEY=...` のようにシェル環境で設定してから CLI を実行してください。
 
 ## CLI での動作確認
 
