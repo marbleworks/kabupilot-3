@@ -22,13 +22,12 @@ pip install -r requirements.txt  # まだ requirements は不要ですが仮の�
 | `OPENAI_ORG` | 任意。組織を指定する必要がある場合に設定します。|
 | `XAI_API_KEY` | xAI Grok API の API キー。|
 | `XAI_BASE_URL` | 任意。自前のプロキシなど別エンドポイントを利用する場合に上書きします。|
-| `KABUPILOT_LLM_PROVIDER` | `openai`（デフォルト）または `xai`。利用する LLM を切り替えます。|
 | `KABUPILOT_OPENAI_MODEL` | 任意。OpenAI 利用時のモデル名（デフォルトは `gpt-4o-mini`）。|
-| `KABUPILOT_XAI_MODEL` | 任意。xAI 利用時のモデル名（デフォルトは `grok-beta`）。|
+| `KABUPILOT_XAI_MODEL` | 任意。xAI Grok 呼び出し時のモデル名（デフォルトは `grok-beta`）。|
 
 いずれも `export OPENAI_API_KEY=...` のようにシェル環境で設定してから CLI を実行してください。
 
-CLI の各エージェント（Planner / Explorer / Researcher / Decider / Checker）は上記の LLM を経由して週次計画や候補抽出、調査結果の要約、トレード判断、日次サマリの生成を行います。API キーが設定されていない場合は内部のフォールバックロジックで簡易な応答を返しますが、実運用では LLM を利用することを前提としています。
+CLI の各エージェント（Planner / Explorer / Researcher / Decider / Checker）は OpenAI GPT を基盤モデルとして利用し、週次計画や候補抽出、調査結果の要約、トレード判断、日次サマリの生成を行います。Researcher エージェントは GPT を中心に回答を構築しつつ、xAI Grok を外部ツールとして呼び出し、取得したニュースやファンダメンタル情報を最終スコアリングに反映します（`XAI_API_KEY` が設定されている場合）。API キーが設定されていない場合は内部のフォールバックロジックで簡易な応答を返しますが、実運用では LLM を利用することを前提としています。
 
 ## CLI での動作確認
 

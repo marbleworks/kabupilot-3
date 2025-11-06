@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
@@ -22,9 +23,12 @@ from .agents import (
 from .config import get_database_path
 from .db import initialize_database
 from .knowledge import ensure_seed_knowledge, load_knowledge_base
-from .llm import OpenAIChatProvider, SupportsLLMGenerate, XAIChatProvider
+from .llm import LLMProviderError, OpenAIChatProvider, SupportsLLMGenerate, XAIChatProvider
 from .models import WatchlistEntry
 from .repository import PortfolioRepository
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_WATCHLISTS: dict[str, Sequence[WatchlistEntry]] = {
@@ -49,14 +53,19 @@ def _create_repository(db_path: str | Path | None) -> PortfolioRepository:
     return PortfolioRepository(db_path)
 
 
-def _create_llm_provider() -> SupportsLLMGenerate:
-    provider_name = os.environ.get("KABUPILOT_LLM_PROVIDER", "openai").lower()
-    if provider_name == "xai":
-        model = os.environ.get("KABUPILOT_XAI_MODEL", "grok-beta")
-        return XAIChatProvider(model=model)
+def _create_gpt_provider() -> SupportsLLMGenerate:
     model = os.environ.get("KABUPILOT_OPENAI_MODEL", "gpt-4o-mini")
     organisation = os.environ.get("OPENAI_ORG")
     return OpenAIChatProvider(model=model, organisation=organisation)
+
+
+def _create_grok_provider() -> SupportsLLMGenerate | None:
+    try:
+        model = os.environ.get("KABUPILOT_XAI_MODEL", "grok-beta")
+        return XAIChatProvider(model=model)
+    except LLMProviderError as exc:
+        LOGGER.warning("Grok provider unavailable: %s", exc)
+        return None
 
 
 def cmd_init_db(args: argparse.Namespace) -> None:
@@ -108,7 +117,7 @@ def cmd_run_planner(args: argparse.Namespace) -> None:
     repository = _create_repository(args.db_path)
     market = repository.get_market()
     knowledge = load_knowledge_base(market, database_path=args.db_path)
-    provider = _create_llm_provider()
+    provider = _create_gpt_provider()
     planner = PlannerAgent(repository, provider, knowledge)
     goal = planner.run(args.week_start)
     print("Planner goal recorded:\n")
@@ -119,9 +128,10 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
     repository = _create_repository(args.db_path)
     market = repository.get_market()
     knowledge = load_knowledge_base(market, database_path=args.db_path)
-    provider = _create_llm_provider()
+    provider = _create_gpt_provider()
+    grok_provider = _create_grok_provider()
     explorer = ExplorerAgent(repository, provider, knowledge)
-    researcher = ResearcherAgent(provider, knowledge)
+    researcher = ResearcherAgent(provider, knowledge, grok_provider)
     leader = ResearchLeaderAgent(researcher)
     decider = DeciderAgent(repository, provider, knowledge)
     updater = PortfolioUpdaterAgent(explorer, leader, decider, repository)
@@ -163,7 +173,7 @@ def cmd_update_memo(args: argparse.Namespace) -> None:
     repository = _create_repository(args.db_path)
     market = repository.get_market()
     knowledge = load_knowledge_base(market, database_path=args.db_path)
-    provider = _create_llm_provider()
+    provider = _create_gpt_provider()
     checker = CheckerAgent(repository, provider, knowledge, args.db_path)
 
     daily_result = None

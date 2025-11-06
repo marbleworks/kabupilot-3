@@ -306,6 +306,44 @@ class ExplorerAgent(LLMAgentMixin):
 class ResearcherAgent(LLMAgentMixin):
     provider: SupportsLLMGenerate
     knowledge: KnowledgeMemo | None = None
+    grok_provider: SupportsLLMGenerate | None = None
+
+    def _query_grok(self, symbol: str, knowledge_context: str) -> str | None:
+        if self.grok_provider is None:
+            return None
+
+        system_prompt = dedent(
+            """
+            You are Grok from xAI acting as an external research tool.
+            Provide concise, factual intelligence about the requested equity.
+            Focus on recent news, catalysts, risks, and any notable valuation commentary.
+            Limit the response to five bullet points or fewer.
+            """
+        )
+        user_prompt = dedent(
+            f"""
+            Ticker: {symbol.upper()}
+            Memo context from the portfolio team:\n{knowledge_context or '(no memo excerpts provided)'}
+            Highlight material developments the primary analyst should know.
+            """
+        )
+
+        try:
+            response = self.grok_provider.generate(
+                [
+                    ChatMessage("system", system_prompt.strip()),
+                    ChatMessage("user", user_prompt.strip()),
+                ],
+                temperature=0.2,
+            )
+        except LLMProviderError as exc:
+            LOGGER.warning("Grok lookup failed for %s: %s", symbol, exc)
+            return None
+
+        cleaned = response.strip()
+        if len(cleaned) > 2000:
+            cleaned = cleaned[:2000]
+        return cleaned or None
 
     def score_symbol(self, symbol: str) -> ResearchFinding:
         knowledge_context = ""
@@ -313,17 +351,21 @@ class ResearcherAgent(LLMAgentMixin):
             context = find_symbol_context(symbol, self.knowledge)
             knowledge_context = context or self.knowledge.content[:1000]
 
+        grok_research = self._query_grok(symbol, knowledge_context)
+
         system_prompt = dedent(
             """
             You are a research analyst evaluating a single equity.
             Return a JSON object with keys: score (float between 0 and 1) and rationale (string).
             Reference the shared memo context when relevant.
+            Leverage the external Grok research notes when they are provided.
             """
         )
         user_prompt = dedent(
             f"""
             Symbol: {symbol.upper()}
             Shared memo context:\n{knowledge_context}
+            External research (xAI Grok):\n{grok_research or 'No Grok insights available.'}
             Provide a short investment thesis with upside/downside factors.
             """
         )
@@ -331,7 +373,9 @@ class ResearcherAgent(LLMAgentMixin):
         fallback_score = 0.55 + (abs(hash(symbol)) % 30) / 100
         fallback = {
             "score": min(1.0, round(fallback_score, 3)),
-            "rationale": knowledge_context or f"Limited memo insight for {symbol}; baseline attractiveness applied.",
+            "rationale": knowledge_context
+            or grok_research
+            or f"Limited memo insight for {symbol}; baseline attractiveness applied.",
         }
 
         result, raw_response = self._call_llm_json(
