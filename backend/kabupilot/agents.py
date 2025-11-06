@@ -1,7 +1,10 @@
-"""Simple agent implementations for the CLI backend."""
+"""LLM-powered agent implementations for the CLI backend."""
 
 from __future__ import annotations
 
+import json
+import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -17,73 +20,340 @@ from .knowledge import (
     symbols_from_memo,
     update_knowledge_memo,
 )
-from .models import ExplorerFinding, Goal, ResearchFinding, Transaction
+from .llm import ChatMessage, LLMProviderError, SupportsLLMGenerate
+from .models import ActivityLog, ExplorerFinding, Goal, ResearchFinding, Transaction
 from .repository import PortfolioRepository
+
+LOGGER = logging.getLogger(__name__)
+
+_JSON_FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_json_dict(text: str) -> dict[str, object]:
+    """Return the first JSON object contained in ``text``."""
+
+    if not text:
+        raise ValueError("Empty response from LLM")
+
+    candidate = text.strip()
+    match = _JSON_FENCE_PATTERN.search(candidate)
+    if match:
+        candidate = match.group(1).strip()
+
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        data = json.loads(candidate[start : end + 1])
+
+    if not isinstance(data, dict):
+        raise ValueError("LLM response did not contain a JSON object")
+    return data
+
+
+def _format_positions(snapshot) -> str:
+    lines: list[str] = []
+    for position in snapshot.positions:
+        lines.append(
+            f"- {position.symbol}: {position.shares:.2f} shares @ ${position.avg_price:,.2f}"
+        )
+    return "\n".join(lines) if lines else "(none)"
+
+
+def _format_watchlist(snapshot) -> str:
+    lines: list[str] = []
+    for entry in snapshot.watchlist:
+        lines.append(f"- {entry.symbol}: {entry.note}")
+    return "\n".join(lines) if lines else "(none)"
+
+
+def _record_activity(
+    repository: PortfolioRepository,
+    *,
+    agent: str,
+    activity_type: str,
+    summary: str,
+    details: dict[str, object] | None = None,
+) -> None:
+    payload = json.dumps(details or {}, ensure_ascii=False, indent=2)
+    repository.record_activity(
+        ActivityLog(
+            timestamp=datetime.utcnow(),
+            agent=agent,
+            activity_type=activity_type,
+            summary=summary,
+            details=payload,
+        )
+    )
+
+
+class LLMAgentMixin:
+    """Utility helpers for agents that rely on an LLM provider."""
+
+    provider: SupportsLLMGenerate
+
+    def _call_llm(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.2,
+        **options: object,
+    ) -> str:
+        messages = [
+            ChatMessage("system", system_prompt.strip()),
+            ChatMessage("user", user_prompt.strip()),
+        ]
+        return self.provider.generate(messages, temperature=temperature, **options)
+
+    def _call_llm_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        fallback: dict[str, object],
+        temperature: float = 0.2,
+        **options: object,
+    ) -> tuple[dict[str, object], str | None]:
+        try:
+            raw = self._call_llm(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=temperature,
+                **options,
+            )
+            data = _extract_json_dict(raw)
+            return data, raw
+        except (LLMProviderError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.warning("LLM request failed (%s); using fallback", exc)
+            return fallback, None
 
 
 @dataclass
-class PlannerAgent:
+class PlannerAgent(LLMAgentMixin):
     repository: PortfolioRepository
+    provider: SupportsLLMGenerate
+    knowledge: KnowledgeMemo | None = None
 
     def run(self, week_start: date) -> Goal:
         snapshot = self.repository.portfolio_snapshot()
-        positions_summary = ", ".join(f"{pos.symbol}:{pos.shares:.1f}" for pos in snapshot.positions) or "no positions"
-        cash = snapshot.cash_balance
-        focus_sector = "technology" if cash > 50000 else "capital preservation"
-        content = dedent(
-            f"""
-            Focus: {focus_sector} ideas with disciplined risk management.
-            Current positions: {positions_summary}
-            Cash on hand: ${cash:,.2f}
-            Goals: identify at least two attractive opportunities while pruning underperformers.
+        knowledge = self.knowledge
+        if knowledge is None:
+            try:
+                knowledge = load_knowledge_base(self.repository.get_market())
+            except Exception:  # pragma: no cover - fallback when DB not available
+                knowledge = KnowledgeMemo(
+                    market=self.repository.get_market(),
+                    content="",
+                    updated_at=datetime.utcnow(),
+                    editor="unknown",
+                )
+
+        self.knowledge = knowledge
+
+        system_prompt = dedent(
             """
-        ).strip()
-        goal = Goal("weekly", datetime.combine(week_start, datetime.min.time()), content)
+            You are the planning agent for an autonomous portfolio manager.
+            Analyse the provided context and propose a concise weekly objective.
+            Respond in JSON with keys: objective (string), focus_areas (list of strings),
+            risk_checks (list of strings), and suggested_metrics (list of strings).
+            """
+        )
+        user_prompt = dedent(
+            f"""
+            Week start: {week_start.isoformat()}
+            Cash on hand: ${snapshot.cash_balance:,.2f}
+            Current positions:\n{_format_positions(snapshot)}
+            Watchlist:\n{_format_watchlist(snapshot)}
+            Shared memo excerpt:\n{knowledge.content[:2000]}
+            """
+        )
+
+        fallback = {
+            "objective": "Maintain disciplined positioning while sourcing two new high-quality ideas.",
+            "focus_areas": [
+                "Review existing watchlist for catalysts",
+                "Stress test largest holdings versus macro backdrop",
+                "Preserve sufficient liquidity for tactical entries",
+            ],
+            "risk_checks": [
+                "Validate position sizing against cash availability",
+                "Monitor volatility in benchmark indices",
+            ],
+            "suggested_metrics": ["net_cash_usage", "new_ideas_identified"],
+        }
+
+        plan, raw_response = self._call_llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            fallback=fallback,
+            temperature=0.15,
+        )
+
+        content_lines = [
+            f"# Weekly Portfolio Goal — {week_start.isoformat()}",
+            f"Objective: {plan.get('objective', fallback['objective'])}",
+            "",
+            "## Focus Areas",
+        ]
+        for item in plan.get("focus_areas", fallback["focus_areas"]):
+            content_lines.append(f"- {item}")
+        content_lines.extend(["", "## Risk Checks"])
+        for item in plan.get("risk_checks", fallback["risk_checks"]):
+            content_lines.append(f"- {item}")
+        metrics = plan.get("suggested_metrics", fallback["suggested_metrics"])
+        if metrics:
+            content_lines.extend(["", "## Suggested Metrics"]) 
+            for metric in metrics:
+                content_lines.append(f"- {metric}")
+
+        goal = Goal(
+            goal_type="weekly",
+            period_start=datetime.combine(week_start, datetime.min.time()),
+            content="\n".join(content_lines).strip(),
+        )
         self.repository.record_goal(goal)
+
+        _record_activity(
+            self.repository,
+            agent="Planner",
+            activity_type="goal",
+            summary=plan.get("objective", fallback["objective"]),
+            details={"plan": plan, "raw_response": raw_response or ""},
+        )
+
         return goal
 
 
 @dataclass
-class ExplorerAgent:
+class ExplorerAgent(LLMAgentMixin):
     repository: PortfolioRepository
+    provider: SupportsLLMGenerate
     knowledge: KnowledgeMemo | None = None
 
     def run(self) -> ExplorerFinding:
-        memo = self.knowledge or load_knowledge_base()
-        suggested = symbols_from_memo(memo)
-        watchlist = self.repository.list_watchlist()
-        if not watchlist:
-            rationale = "No watchlist entries; using symbols highlighted in the shared memo."
-            symbols = suggested[:5]
-            if not symbols:
-                symbols = ["SPY", "QQQ"]
-        else:
-            rationale = "Rotating through watchlist names prioritising technology and growth."
-            symbols = [entry.symbol for entry in watchlist]
-            existing = {symbol for symbol in symbols}
-            for symbol in suggested:
-                if symbol not in existing:
-                    symbols.append(symbol)
-                if len(symbols) >= 5:
-                    break
-        return ExplorerFinding(symbols=symbols, rationale=rationale)
+        snapshot = self.repository.portfolio_snapshot()
+        knowledge = self.knowledge
+        if knowledge is None:
+            try:
+                knowledge = load_knowledge_base(self.repository.get_market())
+            except Exception:  # pragma: no cover - fallback when DB not available
+                knowledge = KnowledgeMemo(
+                    market=self.repository.get_market(),
+                    content="",
+                    updated_at=datetime.utcnow(),
+                    editor="unknown",
+                )
+
+        self.knowledge = knowledge
+
+        suggested = symbols_from_memo(knowledge)
+
+        system_prompt = dedent(
+            """
+            You discover equity symbols to investigate next.
+            Propose up to five tickers prioritising diversification and current requests.
+            Respond in JSON with keys: symbols (list of strings) and rationale (string).
+            """
+        )
+        user_prompt = dedent(
+            f"""
+            Cash balance: ${snapshot.cash_balance:,.2f}
+            Current positions:\n{_format_positions(snapshot)}
+            Watchlist:\n{_format_watchlist(snapshot)}
+            Shared memo excerpt:\n{knowledge.content[:2000]}
+            Previously suggested symbols from memo: {', '.join(suggested) if suggested else 'none'}
+            """
+        )
+
+        fallback = {
+            "symbols": (snapshot.watchlist and [entry.symbol for entry in snapshot.watchlist])
+            or (suggested or ["SPY", "QQQ"]),
+            "rationale": "Rotating through watchlist names and memo highlights to maintain research cadence.",
+        }
+
+        result, raw_response = self._call_llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            fallback=fallback,
+            temperature=0.25,
+        )
+
+        symbols = [str(symbol).upper() for symbol in result.get("symbols", [])]
+        if not symbols:
+            symbols = [str(symbol).upper() for symbol in fallback.get("symbols", [])]
+        symbols = symbols[:5]
+
+        rationale = str(result.get("rationale") or fallback["rationale"])
+
+        finding = ExplorerFinding(symbols=symbols, rationale=rationale)
+
+        _record_activity(
+            self.repository,
+            agent="Explorer",
+            activity_type="discovery",
+            summary=f"Suggested {', '.join(symbols)}",
+            details={"result": result, "raw_response": raw_response or ""},
+        )
+
+        return finding
 
 
 @dataclass
-class ResearcherAgent:
+class ResearcherAgent(LLMAgentMixin):
+    provider: SupportsLLMGenerate
     knowledge: KnowledgeMemo | None = None
 
     def score_symbol(self, symbol: str) -> ResearchFinding:
-        memo = self.knowledge or load_knowledge_base()
-        context = find_symbol_context(symbol, memo)
-        baseline = 0.5 + (abs(hash(symbol)) % 50) / 100
-        score = min(1.0, baseline / 1.2)
-        if context:
-            rationale = context
-            score = min(1.0, score + 0.1)
-        else:
-            rationale = f"No direct insight available for {symbol}."
-        return ResearchFinding(symbol=symbol, score=round(score, 3), rationale=rationale)
+        knowledge_context = ""
+        if self.knowledge:
+            context = find_symbol_context(symbol, self.knowledge)
+            knowledge_context = context or self.knowledge.content[:1000]
+
+        system_prompt = dedent(
+            """
+            You are a research analyst evaluating a single equity.
+            Return a JSON object with keys: score (float between 0 and 1) and rationale (string).
+            Reference the shared memo context when relevant.
+            """
+        )
+        user_prompt = dedent(
+            f"""
+            Symbol: {symbol.upper()}
+            Shared memo context:\n{knowledge_context}
+            Provide a short investment thesis with upside/downside factors.
+            """
+        )
+
+        fallback_score = 0.55 + (abs(hash(symbol)) % 30) / 100
+        fallback = {
+            "score": min(1.0, round(fallback_score, 3)),
+            "rationale": knowledge_context or f"Limited memo insight for {symbol}; baseline attractiveness applied.",
+        }
+
+        result, raw_response = self._call_llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            fallback=fallback,
+            temperature=0.4,
+        )
+
+        try:
+            score = float(result.get("score", fallback["score"]))
+        except (TypeError, ValueError):
+            score = float(fallback["score"])
+        score = max(0.0, min(1.0, score))
+
+        rationale = str(result.get("rationale") or fallback["rationale"])
+
+        finding = ResearchFinding(symbol=symbol.upper(), score=round(score, 3), rationale=rationale)
+
+        LOGGER.debug("Researcher result for %s: %s", symbol, result)
+
+        return finding
 
 
 @dataclass
@@ -91,54 +361,169 @@ class ResearchLeaderAgent:
     researcher: ResearcherAgent
 
     def run(self, symbols: Iterable[str]) -> Sequence[ResearchFinding]:
-        return [self.researcher.score_symbol(symbol) for symbol in symbols]
+        findings = [self.researcher.score_symbol(symbol) for symbol in symbols]
+        return findings
 
 
 @dataclass
-class DeciderAgent:
+class DeciderAgent(LLMAgentMixin):
     repository: PortfolioRepository
+    provider: SupportsLLMGenerate
     knowledge: KnowledgeMemo | None = None
 
     def run(self, findings: Sequence[ResearchFinding]) -> Sequence[Transaction]:
         if not findings:
             return []
 
-        scores = sorted(findings, key=lambda finding: finding.score, reverse=True)
         snapshot = self.repository.portfolio_snapshot()
-        transactions: list[Transaction] = []
-        cash = snapshot.cash_balance
-        # Determine sells for low scoring positions.
-        low_score_threshold = 0.55
-        finding_map = {finding.symbol: finding for finding in findings}
-        for position in snapshot.positions:
-            finding = finding_map.get(position.symbol)
-            if finding and finding.score < low_score_threshold:
-                price = lookup_price(position.symbol)
-                transactions.append(
-                    Transaction(
-                        kind="sell",
-                        symbol=position.symbol,
-                        shares=min(position.shares, 5),
-                        price=price,
-                        reason=f"Score {finding.score:.2f} below threshold",
-                    )
+        knowledge = self.knowledge
+        if knowledge is None:
+            try:
+                knowledge = load_knowledge_base(self.repository.get_market())
+            except Exception:  # pragma: no cover
+                knowledge = KnowledgeMemo(
+                    market=self.repository.get_market(),
+                    content="",
+                    updated_at=datetime.utcnow(),
+                    editor="unknown",
                 )
+        self.knowledge = knowledge
 
-        # Attempt a single buy in the highest scoring name if cash allows.
-        top_candidate = scores[0]
-        price = lookup_price(top_candidate.symbol)
-        lot_size = max(1, int(cash // (price * 2)))
-        if lot_size > 0 and top_candidate.score >= 0.6:
-            transactions.append(
+        findings_payload = [
+            {"symbol": item.symbol, "score": item.score, "rationale": item.rationale}
+            for item in findings
+        ]
+
+        system_prompt = dedent(
+            """
+            You decide trades for the day based on research scores and current holdings.
+            Respond in JSON with keys:
+              - summary (string)
+              - trades (list of objects with kind ['buy'|'sell'], symbol, shares (float), reason)
+            Only propose trades that can be funded with available cash and avoid fractional sells beyond holdings.
+            """
+        )
+        user_prompt = dedent(
+            f"""
+            Cash balance: ${snapshot.cash_balance:,.2f}
+            Positions:\n{_format_positions(snapshot)}
+            Watchlist:\n{_format_watchlist(snapshot)}
+            Research findings (JSON): {json.dumps(findings_payload, ensure_ascii=False)}
+            Shared memo excerpt:\n{knowledge.content[:2000]}
+            """
+        )
+
+        top = max(findings, key=lambda item: item.score)
+        fallback_trades: list[dict[str, object]] = []
+        price_top = lookup_price(top.symbol)
+        max_shares = max(0.0, snapshot.cash_balance // (price_top or 1))
+        if max_shares >= 1 and top.score >= 0.6:
+            fallback_trades.append(
+                {
+                    "kind": "buy",
+                    "symbol": top.symbol,
+                    "shares": float(min(max_shares, 5)),
+                    "reason": f"Highest conviction score {top.score:.2f}",
+                }
+            )
+
+        fallback = {
+            "summary": f"Deploy capital into {top.symbol} while trimming sub-threshold holdings if needed.",
+            "trades": fallback_trades,
+        }
+
+        result, raw_response = self._call_llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            fallback=fallback,
+            temperature=0.2,
+        )
+
+        trades: list[Transaction] = []
+        available_cash = snapshot.cash_balance
+        current_positions = {pos.symbol: pos.shares for pos in snapshot.positions}
+
+        for item in result.get("trades", []):
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind", "")).lower()
+            symbol = str(item.get("symbol", "")).upper()
+            if kind not in {"buy", "sell"} or not symbol:
+                continue
+            try:
+                shares = float(item.get("shares", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if shares <= 0:
+                continue
+            price = lookup_price(symbol)
+            if kind == "buy":
+                max_affordable = available_cash / price if price > 0 else 0
+                if max_affordable <= 0:
+                    continue
+                shares = min(shares, max(0.0, max_affordable))
+                if shares < 1e-6:
+                    continue
+                available_cash -= shares * price
+            else:
+                owned = current_positions.get(symbol, 0.0)
+                if owned <= 0:
+                    continue
+                shares = min(shares, owned)
+                current_positions[symbol] = owned - shares
+            trades.append(
                 Transaction(
-                    kind="buy",
-                    symbol=top_candidate.symbol,
-                    shares=float(lot_size),
+                    kind=kind,
+                    symbol=symbol,
+                    shares=round(shares, 4),
                     price=price,
-                    reason=f"High conviction score {top_candidate.score:.2f}",
+                    reason=str(item.get("reason", result.get("summary", ""))),
                 )
             )
-        return transactions
+
+        if not trades and fallback_trades:
+            for fallback_trade in fallback_trades:
+                symbol = str(fallback_trade["symbol"]).upper()
+                price = lookup_price(symbol)
+                shares = float(fallback_trade.get("shares", 0.0))
+                if shares <= 0:
+                    continue
+                if shares * price > available_cash:
+                    continue
+                trades.append(
+                    Transaction(
+                        kind=str(fallback_trade.get("kind", "buy")),
+                        symbol=symbol,
+                        shares=round(shares, 4),
+                        price=price,
+                        reason=str(fallback_trade.get("reason", "Fallback action")),
+                    )
+                )
+                break
+
+        if trades:
+            summary = result.get("summary") or fallback.get("summary", "Decider trades executed")
+        else:
+            summary = "No trades executed; constraints prevented action."
+
+        _record_activity(
+            self.repository,
+            agent="Decider",
+            activity_type="decision",
+            summary=summary,
+            details={"result": result, "raw_response": raw_response or "", "trades": [
+                {
+                    "kind": trade.kind,
+                    "symbol": trade.symbol,
+                    "shares": trade.shares,
+                    "price": trade.price,
+                    "reason": trade.reason,
+                }
+                for trade in trades
+            ]},
+        )
+
+        return trades
 
 
 @dataclass
@@ -161,171 +546,121 @@ class PortfolioUpdaterAgent:
 
 
 @dataclass
-class CheckerAgent:
+class CheckerAgent(LLMAgentMixin):
     repository: PortfolioRepository
+    provider: SupportsLLMGenerate
     knowledge: KnowledgeMemo | None = None
     database_path: str | Path | None = None
 
     def run(self, as_of: date, *, daily_result: dict | None = None) -> str:
         snapshot = self.repository.portfolio_snapshot()
-        total_value = snapshot.total_equity(lambda symbol: lookup_price(symbol))
+        knowledge = self.knowledge
+        market = self.repository.get_market()
+        if knowledge is None:
+            knowledge = load_knowledge_base(market, database_path=self.database_path)
+        self.knowledge = knowledge
 
-        def _coerce_explorer(value: object) -> ExplorerFinding | None:
-            if value is None:
-                return None
-            if isinstance(value, ExplorerFinding):
-                return value
-            if isinstance(value, dict):
-                symbols_raw = value.get("symbols", [])
-                if isinstance(symbols_raw, str):
-                    symbols = [symbols_raw]
-                else:
-                    symbols = list(symbols_raw or [])
-                rationale = str(value.get("rationale", ""))
-                return ExplorerFinding(symbols=symbols, rationale=rationale)
-            if isinstance(value, (list, tuple, set)):
-                return ExplorerFinding(symbols=list(value), rationale="")
-            return ExplorerFinding(symbols=[str(value)], rationale="")
+        explorer_symbols: list[str] = []
+        research_summary = "No research recorded"
+        transaction_summary = "No trades executed"
 
-        def _coerce_research(items: object) -> Sequence[ResearchFinding]:
-            results: list[ResearchFinding] = []
-            if not items:
-                return results
-            if isinstance(items, str):
-                iterable: Sequence[object] = [items]
-            elif isinstance(items, Sequence):
-                iterable = items
-            else:
-                iterable = [items]
-            for item in iterable:
-                if isinstance(item, ResearchFinding):
-                    results.append(item)
-                elif isinstance(item, dict):
-                    symbol = str(item.get("symbol", ""))
-                    score_raw = item.get("score", 0.0)
-                    try:
-                        score = float(score_raw)
-                    except (TypeError, ValueError):
-                        score = 0.0
-                    rationale = str(item.get("rationale", ""))
-                    results.append(ResearchFinding(symbol=symbol, score=score, rationale=rationale))
-            return results
-
-        def _coerce_transactions(items: object) -> Sequence[Transaction]:
-            results: list[Transaction] = []
-            if not items:
-                return results
-            if isinstance(items, str):
-                iterable: Sequence[object] = [items]
-            elif isinstance(items, Sequence):
-                iterable = items
-            else:
-                iterable = [items]
-            for item in iterable:
-                if isinstance(item, Transaction):
-                    results.append(item)
-                elif isinstance(item, dict):
-                    kind = str(item.get("kind", ""))
-                    symbol = str(item.get("symbol", ""))
-                    try:
-                        shares = float(item.get("shares", 0.0))
-                    except (TypeError, ValueError):
-                        shares = 0.0
-                    try:
-                        price = float(item.get("price", 0.0))
-                    except (TypeError, ValueError):
-                        price = 0.0
-                    reason = str(item.get("reason", ""))
-                    results.append(
-                        Transaction(
-                            kind=kind,
-                            symbol=symbol,
-                            shares=shares,
-                            price=price,
-                            reason=reason,
-                        )
-                    )
-            return results
-
-        explorer_result: ExplorerFinding | None = None
-        research_findings: Sequence[ResearchFinding] = []
-        transactions: Sequence[Transaction] = []
         if daily_result:
-            explorer_result = _coerce_explorer(daily_result.get("explorer"))
-            research_findings = _coerce_research(daily_result.get("research", []))
-            transactions = _coerce_transactions(daily_result.get("transactions", []))
+            explorer_data = daily_result.get("explorer")
+            if isinstance(explorer_data, dict):
+                explorer_symbols = [str(sym).upper() for sym in explorer_data.get("symbols", [])]
+            research_items = daily_result.get("research")
+            if isinstance(research_items, list) and research_items:
+                research_summary = ", ".join(
+                    f"{item.get('symbol', '')}:{float(item.get('score', 0)):.2f}"
+                    for item in research_items
+                    if isinstance(item, dict)
+                )
+            transactions_items = daily_result.get("transactions")
+            if isinstance(transactions_items, list) and transactions_items:
+                entries: list[str] = []
+                for item in transactions_items:
+                    if not isinstance(item, dict):
+                        continue
+                    entries.append(
+                        f"{item.get('kind', '').upper()} {item.get('symbol', '')} {item.get('shares', 0)}"
+                    )
+                if entries:
+                    transaction_summary = "; ".join(entries)
 
-        explorer_symbols = list(explorer_result.symbols) if explorer_result else []
-        explorer_summary = (
-            ", ".join(explorer_symbols) if explorer_symbols else "No symbols proposed"
+        system_prompt = dedent(
+            """
+            You are the checker agent summarising the day's activity.
+            Produce JSON with keys: summary (string), requests (list of strings), history_entry (string),
+            memo_update (string for memo latest summary), and public_report (string for CLI output).
+            Use provided portfolio state and outcomes.
+            """
         )
-        research_summary = (
-            "; ".join(f"{finding.symbol}:{finding.score:.2f}" for finding in research_findings)
-            if research_findings
-            else "No research scores recorded"
-        )
-        transaction_summary = (
-            "; ".join(
-                f"{tx.kind.upper()} {tx.symbol} {tx.shares:.2f} @ ${tx.price:,.2f}"
-                for tx in transactions
-            )
-            if transactions
-            else "No trades executed"
-        )
-
-        latest_summary = dedent(
+        user_prompt = dedent(
             f"""
             Date: {as_of.isoformat()}
-            Explorer: {explorer_summary}
+            Cash balance: ${snapshot.cash_balance:,.2f}
+            Positions:\n{_format_positions(snapshot)}
+            Watchlist:\n{_format_watchlist(snapshot)}
+            Explorer symbols: {', '.join(explorer_symbols) if explorer_symbols else 'none'}
+            Research summary: {research_summary}
+            Transactions: {transaction_summary}
+            Shared memo excerpt:\n{knowledge.content[:2000]}
+            """
+        )
+
+        fallback_summary = dedent(
+            f"""
+            Date: {as_of.isoformat()}
+            Explorer: {', '.join(explorer_symbols) if explorer_symbols else 'No new symbols'}
             Research: {research_summary}
-            Decider: {transaction_summary}
-            Portfolio equity (est.): ${total_value:,.2f}
+            Transactions: {transaction_summary}
+            Portfolio equity (est.): ${snapshot.total_equity(lambda symbol: lookup_price(symbol)):,.2f}
             Cash balance: ${snapshot.cash_balance:,.2f}
             """
         ).strip()
 
-        requests: list[str] = []
-        if explorer_result and not explorer_symbols:
-            requests.append("Explorer: expand symbol discovery to refill the pipeline.")
-        if not transactions:
-            requests.append("Decider: identify actionable trades to deploy capital.")
-        if snapshot.cash_balance > 0 and total_value > 0:
-            cash_ratio = snapshot.cash_balance / total_value
-            if cash_ratio > 0.4:
-                requests.append("Planner: address elevated cash levels above 40% of equity.")
-        if not requests:
-            requests.append("All agents: continue executing against the weekly objective.")
+        fallback = {
+            "summary": "Maintain momentum and continue sourcing differentiated ideas.",
+            "requests": ["Explorer: identify fresh symbols to evaluate."],
+            "history_entry": fallback_summary.replace("\n", " "),
+            "memo_update": fallback_summary,
+            "public_report": fallback_summary,
+        }
 
-        history_entry = (
-            f"{as_of.isoformat()} — Explorer: {explorer_summary}; "
-            f"Research: {research_summary}; Decider: {transaction_summary}; "
-            f"Cash ${snapshot.cash_balance:,.2f}"
+        result, raw_response = self._call_llm_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            fallback=fallback,
+            temperature=0.15,
         )
 
-        market = self.repository.get_market()
+        memo_summary = str(result.get("memo_update") or fallback["memo_update"])
+        requests = [str(item) for item in result.get("requests", fallback["requests"])]
+        if not requests:
+            requests = fallback["requests"]
+        history_entry = str(result.get("history_entry") or fallback["history_entry"])
 
         update_knowledge_memo(
             market=market,
             database_path=self.database_path,
             transform=lambda current: rewrite_memo_with_daily_digest(
                 current,
-                latest_summary=latest_summary,
+                latest_summary=memo_summary,
                 requests=requests,
                 history_entry=history_entry,
                 editor="checker",
             ),
         )
 
-        positions_text = ", ".join(
-            f"{pos.symbol} ({pos.shares:.2f} sh)" for pos in snapshot.positions
-        ) or "None"
+        public_report = str(result.get("public_report") or fallback["public_report"])
 
-        return dedent(
-            f"""
-            Date: {as_of.isoformat()}
-            Cash: ${snapshot.cash_balance:,.2f}
-            Positions: {positions_text}
-            Estimated equity value: ${total_value:,.2f}
-            Shared memo updated with the latest checker digest.
-            """
-        ).strip()
+        _record_activity(
+            self.repository,
+            agent="Checker",
+            activity_type="summary",
+            summary=result.get("summary", fallback["summary"]),
+            details={"result": result, "raw_response": raw_response or ""},
+        )
+
+        return public_report.strip()
+

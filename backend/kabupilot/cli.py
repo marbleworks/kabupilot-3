@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,7 @@ from .agents import (
 from .config import get_database_path
 from .db import initialize_database
 from .knowledge import ensure_seed_knowledge, load_knowledge_base
+from .llm import OpenAIChatProvider, SupportsLLMGenerate, XAIChatProvider
 from .models import WatchlistEntry
 from .repository import PortfolioRepository
 
@@ -45,6 +47,16 @@ DEFAULT_WATCHLISTS: dict[str, Sequence[WatchlistEntry]] = {
 
 def _create_repository(db_path: str | Path | None) -> PortfolioRepository:
     return PortfolioRepository(db_path)
+
+
+def _create_llm_provider() -> SupportsLLMGenerate:
+    provider_name = os.environ.get("KABUPILOT_LLM_PROVIDER", "openai").lower()
+    if provider_name == "xai":
+        model = os.environ.get("KABUPILOT_XAI_MODEL", "grok-beta")
+        return XAIChatProvider(model=model)
+    model = os.environ.get("KABUPILOT_OPENAI_MODEL", "gpt-4o-mini")
+    organisation = os.environ.get("OPENAI_ORG")
+    return OpenAIChatProvider(model=model, organisation=organisation)
 
 
 def cmd_init_db(args: argparse.Namespace) -> None:
@@ -94,7 +106,10 @@ def cmd_show_portfolio(args: argparse.Namespace) -> None:
 
 def cmd_run_planner(args: argparse.Namespace) -> None:
     repository = _create_repository(args.db_path)
-    planner = PlannerAgent(repository)
+    market = repository.get_market()
+    knowledge = load_knowledge_base(market, database_path=args.db_path)
+    provider = _create_llm_provider()
+    planner = PlannerAgent(repository, provider, knowledge)
     goal = planner.run(args.week_start)
     print("Planner goal recorded:\n")
     print(goal.content)
@@ -104,10 +119,11 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
     repository = _create_repository(args.db_path)
     market = repository.get_market()
     knowledge = load_knowledge_base(market, database_path=args.db_path)
-    explorer = ExplorerAgent(repository, knowledge)
-    researcher = ResearcherAgent(knowledge)
+    provider = _create_llm_provider()
+    explorer = ExplorerAgent(repository, provider, knowledge)
+    researcher = ResearcherAgent(provider, knowledge)
     leader = ResearchLeaderAgent(researcher)
-    decider = DeciderAgent(repository, knowledge)
+    decider = DeciderAgent(repository, provider, knowledge)
     updater = PortfolioUpdaterAgent(explorer, leader, decider, repository)
 
     print(f"Running daily portfolio update for market '{market}'...\n")
@@ -147,7 +163,8 @@ def cmd_update_memo(args: argparse.Namespace) -> None:
     repository = _create_repository(args.db_path)
     market = repository.get_market()
     knowledge = load_knowledge_base(market, database_path=args.db_path)
-    checker = CheckerAgent(repository, knowledge, args.db_path)
+    provider = _create_llm_provider()
+    checker = CheckerAgent(repository, provider, knowledge, args.db_path)
 
     daily_result = None
     if args.result_path:

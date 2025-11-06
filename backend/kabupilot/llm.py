@@ -175,6 +175,7 @@ __all__ = [
     "ChatMessage",
     "ChatRole",
     "LLMProviderError",
+    "SupportsLLMGenerate",
     "OpenAIChatProvider",
     "XAIChatProvider",
 ]
