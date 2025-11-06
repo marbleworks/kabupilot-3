@@ -1,195 +1,95 @@
-"""Utility helpers to work with the SQLite-backed knowledge base."""
+"""Utility helpers to work with the SQLite-backed knowledge memo."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Sequence
 
 from .db import get_connection
 
 
 @dataclass(frozen=True)
-class KnowledgeEntry:
+class KnowledgeMemo:
+    """Represents the shared memo that all agents can read."""
+
     market: str
-    symbol: str
-    sector: str
-    insight: str
-    fair_price: float
-    source: str
-    recorded_at: datetime
+    content: str
+    updated_at: datetime
+    editor: str
 
 
-DEFAULT_KNOWLEDGE_SEEDS: Mapping[str, Sequence[Mapping[str, object]]] = {
+DEFAULT_SYMBOL_NOTES = {
     "jp": (
-        {
-            "symbol": "7203.T",
-            "sector": "automotive",
-            "insight": (
-                "Explorer feedback: Toyota retains wide dealer coverage in Japan; focus on EV"
-                " launch readiness during weekly planning."
-            ),
-            "fair_price": 2250.0,
-            "source": "seed:research-2024w10",
-        },
-        {
-            "symbol": "6758.T",
-            "sector": "electronics",
-            "insight": (
-                "Research retrospective noted that Sony's sensor exports cushioned FX swings."
-                " Track progress when assigning researcher follow-ups."
-            ),
-            "fair_price": 13500.0,
-            "source": "seed:research-2024w10",
-        },
-        {
-            "symbol": "8306.T",
-            "sector": "financials",
-            "insight": (
-                "Post-trade analysis highlighted Mitsubishi UFJ as low-volatility cash park."
-                " Use when cash exceeds 40% of equity."
-            ),
-            "fair_price": 1200.0,
-            "source": "seed:portfolio-review",
-        },
-        {
-            "symbol": "8035.T",
-            "sector": "semiconductors",
-            "insight": (
-                "Daily checker flagged Tokyo Electron supply-chain resilience; keep in the"
-                " short list for technology rotations."
-            ),
-            "fair_price": 23000.0,
-            "source": "seed:checker-summary",
-        },
-        {
-            "symbol": "2914.T",
-            "sector": "consumer staples",
-            "insight": (
-                "Activity log review: Calbee price momentum softened but volume steady."
-                " Consider trimming only after confirming two weak weekly scans."
-            ),
-            "fair_price": 3200.0,
-            "source": "seed:activity-review",
-        },
+        "- 7203.T — Core mobility benchmark for EV roll-out progress.",
+        "- 6758.T — Imaging growth leverages global demand.",
+        "- 8035.T — Semiconductor capital expenditure gauge.",
+        "- 9432.T — Defensive telecom cash generator.",
+        "- 2914.T — Consumer staples ballast for volatility.",
     ),
     "us": (
-        {
-            "symbol": "AAPL",
-            "sector": "technology",
-            "insight": (
-                "Research synthesis shows Apple services margin expansion offsets hardware"
-                " cyclicality; bias to accumulate on pullbacks."
-            ),
-            "fair_price": 195.0,
-            "source": "seed:research-2024q1",
-        },
-        {
-            "symbol": "MSFT",
-            "sector": "technology",
-            "insight": (
-                "Cross-agent retrospective: Azure AI growth improves recurring revenue"
-                " visibility; allocate when cash above $30k."
-            ),
-            "fair_price": 340.0,
-            "source": "seed:planning-retro",
-        },
-        {
-            "symbol": "TSLA",
-            "sector": "automotive",
-            "insight": (
-                "Decider post-mortem suggests pairing Tesla entries with tighter position"
-                " sizing due to delivery volatility."
-            ),
-            "fair_price": 210.0,
-            "source": "seed:transaction-review",
-        },
-        {
-            "symbol": "NVDA",
-            "sector": "semiconductors",
-            "insight": (
-                "Checker summaries emphasise Nvidia backlog strength; prioritise for"
-                " growth-oriented rebalancing weeks."
-            ),
-            "fair_price": 620.0,
-            "source": "seed:checker-summary",
-        },
-        {
-            "symbol": "JNJ",
-            "sector": "healthcare",
-            "insight": (
-                "Exploration notes: Johnson & Johnson dividend stability useful for"
-                " offsetting tech concentration risk."
-            ),
-            "fair_price": 165.0,
-            "source": "seed:explorer-journal",
-        },
+        "- AAPL — Platform ecosystem with services tailwinds.",
+        "- MSFT — Cloud and AI enterprise exposure.",
+        "- NVDA — GPU leadership amid AI investment cycle.",
+        "- TSLA — EV innovation with position sizing discipline.",
+        "- JNJ — Healthcare stabiliser for portfolio balance.",
     ),
 }
+
+DEFAULT_MEMO_TEMPLATE = """# Shared Agent Memo ({market_label})
+
+## Purpose
+- Maintain a single memo where agents can review recent activity summaries, lessons,
+  and requests before starting their next task.
+
+## Latest Daily Summary
+_No daily runs have been recorded yet._
+
+## Open Requests
+- Awaiting the first checker summary to derive concrete requests.
+
+## Historical Notes
+- Memo created to replace the per-symbol knowledge base.
+{symbol_lines}
+"""
+
+
+def _default_content_for_market(market: str) -> str:
+    market_key = market.lower()
+    market_label = "JP" if market_key == "jp" else "US"
+    symbol_lines = "\n" + "\n".join(DEFAULT_SYMBOL_NOTES.get(market_key, ()))
+    return DEFAULT_MEMO_TEMPLATE.format(market_label=market_label, symbol_lines=symbol_lines)
 
 
 def _ensure_table(connection) -> None:
     connection.executescript(
         """
-        CREATE TABLE IF NOT EXISTS knowledge_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            market TEXT NOT NULL,
-            symbol TEXT NOT NULL,
-            sector TEXT NOT NULL,
-            insight TEXT NOT NULL,
-            fair_price REAL NOT NULL,
-            source TEXT NOT NULL,
-            recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+        CREATE TABLE IF NOT EXISTS knowledge_documents (
+            market TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            editor TEXT NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_knowledge_market_symbol
-            ON knowledge_entries (market, symbol);
         """
     )
 
 
 def ensure_seed_knowledge(*, database_path: str | Path | None = None) -> None:
-    """Populate the knowledge base with default collaborative insights if empty."""
+    """Ensure that the shared memo exists for both supported markets."""
 
     with get_connection(database_path) as connection:
         _ensure_table(connection)
-        (existing_count,) = connection.execute(
-            "SELECT COUNT(1) FROM knowledge_entries"
-        ).fetchone()
-        if existing_count:
-            return
-
-        payload: list[tuple[str, str, str, str, float, str, str]] = []
         timestamp = datetime.utcnow().isoformat()
-        for market, entries in DEFAULT_KNOWLEDGE_SEEDS.items():
-            for entry in entries:
-                payload.append(
-                    (
-                        market,
-                        str(entry["symbol"]).upper(),
-                        str(entry["sector"]),
-                        str(entry["insight"]),
-                        float(entry["fair_price"]),
-                        str(entry["source"]),
-                        timestamp,
-                    )
-                )
-
-        connection.executemany(
-            """
-            INSERT INTO knowledge_entries (
-                market,
-                symbol,
-                sector,
-                insight,
-                fair_price,
-                source,
-                recorded_at
+        for market in ("jp", "us"):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO knowledge_documents (market, content, updated_at, editor)
+                VALUES (?, ?, ?, ?)
+                """,
+                (market, _default_content_for_market(market), timestamp, "system"),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            payload,
-        )
         connection.commit()
 
 
@@ -197,85 +97,199 @@ def load_knowledge_base(
     market: str | None = "jp",
     *,
     database_path: str | Path | None = None,
-) -> Sequence[KnowledgeEntry]:
-    """Load the knowledge base for the requested market from SQLite."""
+) -> KnowledgeMemo:
+    """Load the shared memo for the requested market from SQLite."""
 
-    params: list[object] = []
-    query = (
-        "SELECT market, symbol, sector, insight, fair_price, source, recorded_at"
-        " FROM knowledge_entries"
-    )
-    if market:
-        query += " WHERE market = ?"
-        params.append(market.lower())
-    query += " ORDER BY recorded_at DESC, id DESC"
-
+    resolved_market = (market or "jp").lower()
     with get_connection(database_path) as connection:
         _ensure_table(connection)
-        rows = connection.execute(query, params).fetchall()
-
-    return [
-        KnowledgeEntry(
+        row = connection.execute(
+            "SELECT market, content, updated_at, editor FROM knowledge_documents WHERE market = ?",
+            (resolved_market,),
+        ).fetchone()
+        if row is None:
+            ensure_seed_knowledge(database_path=database_path)
+            row = connection.execute(
+                "SELECT market, content, updated_at, editor FROM knowledge_documents WHERE market = ?",
+                (resolved_market,),
+            ).fetchone()
+        assert row is not None
+        return KnowledgeMemo(
             market=str(row["market"]),
-            symbol=str(row["symbol"]).upper(),
-            sector=str(row["sector"]),
-            insight=str(row["insight"]),
-            fair_price=float(row["fair_price"]),
-            source=str(row["source"]),
-            recorded_at=datetime.fromisoformat(str(row["recorded_at"])),
+            content=str(row["content"]),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+            editor=str(row["editor"]),
         )
-        for row in rows
-    ]
 
 
-def record_knowledge_entry(
+def update_knowledge_memo(
     *,
     market: str,
-    symbol: str,
-    sector: str,
-    insight: str,
-    fair_price: float,
-    source: str,
+    transform: Callable[[KnowledgeMemo], KnowledgeMemo],
     database_path: str | Path | None = None,
-    recorded_at: datetime | None = None,
-) -> None:
-    """Persist a new knowledge entry so other agents can reuse the insight."""
+) -> KnowledgeMemo:
+    """Apply ``transform`` to the stored memo and persist the new version."""
 
+    current = load_knowledge_base(market, database_path=database_path)
+    updated = transform(current)
     with get_connection(database_path) as connection:
         _ensure_table(connection)
         connection.execute(
             """
-            INSERT INTO knowledge_entries (
-                market,
-                symbol,
-                sector,
-                insight,
-                fair_price,
-                source,
-                recorded_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            UPDATE knowledge_documents
+            SET content = ?, updated_at = ?, editor = ?
+            WHERE market = ?
             """,
-            (
-                market.lower(),
-                symbol.upper(),
-                sector,
-                insight,
-                float(fair_price),
-                source,
-                (recorded_at or datetime.utcnow()).isoformat(),
-            ),
+            (updated.content, updated.updated_at.isoformat(), updated.editor, market.lower()),
         )
         connection.commit()
+    return updated
 
 
-def lookup_price(symbol: str, knowledge: Iterable[KnowledgeEntry] | None = None) -> float:
-    """Return the stored fair price for ``symbol`` or a deterministic fallback."""
+SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{1,5}(?:\.[A-Z]{1,2})?$")
+
+
+def symbols_from_memo(memo: KnowledgeMemo, *, limit: int = 5) -> list[str]:
+    """Extract symbol mentions from bullet lists in the memo."""
+
+    symbols: list[str] = []
+    for line in memo.content.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("-"):
+            continue
+        remainder = stripped[1:].strip()
+        if not remainder:
+            continue
+        token = remainder.split(maxsplit=1)[0].rstrip("—:-")
+        if not SYMBOL_PATTERN.match(token):
+            continue
+        symbol = token.upper()
+        if symbol not in symbols:
+            symbols.append(symbol)
+        if len(symbols) >= limit:
+            break
+    return symbols
+
+
+def find_symbol_context(symbol: str, memo: KnowledgeMemo) -> str | None:
+    """Return the memo line mentioning ``symbol`` if present."""
+
+    upper = symbol.upper()
+    fallback: str | None = None
+    for line in memo.content.splitlines():
+        if upper not in line.upper():
+            continue
+        stripped = line.strip()
+        if stripped.startswith("-"):
+            remainder = stripped[1:].strip()
+            token = remainder.split(maxsplit=1)[0].rstrip("—:-") if remainder else ""
+            if SYMBOL_PATTERN.match(token or "") and token.upper() == upper:
+                return remainder
+        if fallback is None:
+            fallback = stripped
+    return fallback
+
+
+def _parse_sections(content: str) -> tuple[str, dict[str, str]]:
+    header_lines: list[str] = []
+    sections: dict[str, list[str]] = {}
+    current_section: str | None = None
+    buffer: list[str] = []
+
+    lines = content.splitlines()
+    for line in lines:
+        if line.startswith("## "):
+            if current_section is None:
+                header_lines = buffer
+            else:
+                sections[current_section] = buffer
+            current_section = line[3:].strip()
+            buffer = []
+        else:
+            buffer.append(line)
+
+    if current_section is None:
+        header_lines = buffer
+    else:
+        sections[current_section] = buffer
+
+    normalized_sections = {
+        key: "\n".join(value).strip()
+        for key, value in sections.items()
+    }
+    header = "\n".join(header_lines).strip()
+    return header, normalized_sections
+
+
+def _render_sections(header: str, sections: dict[str, str]) -> str:
+    ordered_titles = [
+        "Purpose",
+        "Latest Daily Summary",
+        "Open Requests",
+        "Historical Notes",
+    ]
+    parts: list[str] = []
+    if header:
+        parts.append(header.strip())
+
+    for title in ordered_titles:
+        body = sections.get(title)
+        if body is None:
+            continue
+        parts.append(f"## {title}\n{body.strip() if body else ''}".rstrip())
+
+    # Include any additional sections that may have been added over time.
+    for title, body in sections.items():
+        if title in ordered_titles:
+            continue
+        parts.append(f"## {title}\n{body.strip() if body else ''}".rstrip())
+
+    return "\n\n".join(filter(None, parts))
+
+
+def rewrite_memo_with_daily_digest(
+    memo: KnowledgeMemo,
+    *,
+    latest_summary: str,
+    requests: Sequence[str],
+    history_entry: str,
+    editor: str,
+) -> KnowledgeMemo:
+    """Produce a new memo incorporating the checker digest."""
+
+    header, sections = _parse_sections(memo.content)
+
+    summary_body = latest_summary.strip() or "_No summary recorded._"
+    sections["Latest Daily Summary"] = summary_body
+
+    request_lines = [f"- {item}" for item in requests if item]
+    if not request_lines:
+        request_lines = ["- No outstanding requests; maintain discipline."]
+    sections["Open Requests"] = "\n".join(request_lines)
+
+    history_block = sections.get("Historical Notes", "")
+    history_lines = [line.strip() for line in history_block.splitlines() if line.strip()]
+    history_lines.insert(0, history_entry.strip())
+    # Keep the history from growing unbounded while still giving context.
+    history_lines = history_lines[:20]
+    sections["Historical Notes"] = "\n".join(f"- {line.lstrip('- ').strip()}" for line in history_lines)
+
+    new_content = _render_sections(header, sections)
+    return KnowledgeMemo(
+        market=memo.market,
+        content=new_content,
+        updated_at=datetime.utcnow(),
+        editor=editor,
+    )
+
+
+def lookup_price(symbol: str, knowledge: Iterable[object] | None = None) -> float:
+    """Return a deterministic synthetic price for ``symbol``.
+
+    The memo no longer stores per-symbol fair values, so we fall back to a stable hash-based
+    price that keeps the simulator functional while agents rely on the shared memo for
+    qualitative coordination.
+    """
 
     symbol = symbol.upper()
-    entries = list(knowledge or load_knowledge_base())
-    for entry in entries:
-        if entry.symbol == symbol:
-            return entry.fair_price
-    # Fall back to a synthetic price derived from the ticker so the system can still run.
     return (abs(hash(symbol)) % 40000) / 100 + 20

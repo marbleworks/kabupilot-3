@@ -38,20 +38,12 @@ SCHEMA_STATEMENTS = (
     );
     """,
     """
-    CREATE TABLE IF NOT EXISTS knowledge_entries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        market TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        sector TEXT NOT NULL,
-        insight TEXT NOT NULL,
-        fair_price REAL NOT NULL,
-        source TEXT NOT NULL,
-        recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+    CREATE TABLE IF NOT EXISTS knowledge_documents (
+        market TEXT PRIMARY KEY,
+        content TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        editor TEXT NOT NULL
     );
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_knowledge_market_symbol
-        ON knowledge_entries (market, symbol);
     """,
     """
     CREATE TABLE IF NOT EXISTS activity_log (

@@ -23,6 +23,24 @@ from .models import WatchlistEntry
 from .repository import PortfolioRepository
 
 
+DEFAULT_WATCHLISTS: dict[str, Sequence[WatchlistEntry]] = {
+    "jp": (
+        WatchlistEntry("7203.T", "Core mobility leader for EV coverage"),
+        WatchlistEntry("6758.T", "Imaging and entertainment exposure"),
+        WatchlistEntry("8035.T", "Semiconductor equipment bellwether"),
+        WatchlistEntry("9432.T", "Stable telecom cashflow"),
+        WatchlistEntry("2914.T", "Consumer staples defensiveness"),
+    ),
+    "us": (
+        WatchlistEntry("AAPL", "Platform ecosystem strength"),
+        WatchlistEntry("MSFT", "Cloud and productivity leader"),
+        WatchlistEntry("NVDA", "AI infrastructure momentum"),
+        WatchlistEntry("TSLA", "EV innovation watch"),
+        WatchlistEntry("JNJ", "Healthcare ballast"),
+    ),
+}
+
+
 def _create_repository(db_path: str | Path | None) -> PortfolioRepository:
     return PortfolioRepository(db_path)
 
@@ -35,11 +53,7 @@ def cmd_init_db(args: argparse.Namespace) -> None:
 
     # Seed watchlist from the knowledge base to help the Explorer agent.
     market = repository.get_market()
-    knowledge = load_knowledge_base(market, database_path=db_path)
-    repository.replace_watchlist(
-        WatchlistEntry(entry.symbol, f"Seed from knowledge base ({entry.sector})")
-        for entry in knowledge[:5]
-    )
+    repository.replace_watchlist(DEFAULT_WATCHLISTS[market])
 
     print(f"Database initialised at {db_path} (market={market})")
 
@@ -93,7 +107,7 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
     leader = ResearchLeaderAgent(researcher)
     decider = DeciderAgent(repository, knowledge)
     updater = PortfolioUpdaterAgent(explorer, leader, decider, repository)
-    checker = CheckerAgent(repository, knowledge)
+    checker = CheckerAgent(repository, knowledge, args.db_path)
 
     print(f"Running daily portfolio update for market '{market}'...\n")
     result = updater.run()
@@ -111,7 +125,7 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
     else:
         print("  (none)")
 
-    summary = checker.run(args.date)
+    summary = checker.run(args.date, daily_result=result)
     print("\nDaily checker summary:\n")
     print(summary)
 
@@ -121,11 +135,7 @@ def cmd_set_market(args: argparse.Namespace) -> None:
     repository.set_market(args.market)
 
     if args.refresh_watchlist:
-        knowledge = load_knowledge_base(args.market, database_path=args.db_path)
-        repository.replace_watchlist(
-            WatchlistEntry(entry.symbol, f"Seed from knowledge base ({entry.sector})")
-            for entry in knowledge[:5]
-        )
+        repository.replace_watchlist(DEFAULT_WATCHLISTS[args.market])
 
     print(f"Market updated to '{args.market}'")
     if args.refresh_watchlist:

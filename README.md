@@ -43,9 +43,9 @@ pip install -r requirements.txt  # まだ requirements は不要ですが仮の�
 
 ### ナレッジベースについて
 
-* ナレッジベースは `kabupilot.db` の `knowledge_entries` テーブルに保存されます。
-* `init-db` 実行時に各市場向けの初期インサイトが投入され、以降はエージェントが参照・追記します。
-* CLI コマンドは常に SQLite 上のナレッジを参照し、ウォッチリストの初期化や調査スコアリングに活用します。
+* ナレッジベースはエージェント共有のメモとして `kabupilot.db` の `knowledge_documents` テーブルに保存されます。
+* `init-db` 実行時に市場ごとのテンプレートメモが作成され、日次の `run-daily` 実行後に Checker が各エージェントの活動サマリ・反省点・要求を反映します。
+* Explorer/Researcher などのエージェントはメモに記載された銘柄や要望を参照し、次回の動作に反映します。
 
 ### 市場設定の切り替え
 
@@ -62,3 +62,5 @@ python -m kabupilot.cli set-market us --refresh-watchlist
 ```bash
 python -m kabupilot.cli set-market jp --refresh-watchlist
 ```
+
+ウォッチリストの初期値は市場ごとの定義済みセットから再構築され、共有メモは市場設定に応じた同一ドキュメントを参照します。
