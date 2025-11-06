@@ -16,7 +16,6 @@ pip install -r requirements.txt  # まだ requirements は不要ですが仮の�
 ## CLI での動作確認
 
 以下のコマンドは `backend` ディレクトリ内で実行してください。
-オプションで `--market` に `jp`（日本株、デフォルト）または `us`（米国株）を指定できます。
 
 1. SQLite データベースを初期化します。
 
@@ -42,8 +41,18 @@ pip install -r requirements.txt  # まだ requirements は不要ですが仮の�
    python -m kabupilot.cli show-portfolio
    ```
 
-米国株モードの例：
+### 市場設定の切り替え
+
+設定値は SQLite データベースに保存されます。デフォルトは日本株（`jp`）です。
+
+米国株へ切り替える場合は以下を実行してください（必要に応じてウォッチリストも再構築されます）。
 
 ```bash
-python -m kabupilot.cli --market us run-daily
+python -m kabupilot.cli set-market us --refresh-watchlist
+```
+
+再度日本株へ戻す場合：
+
+```bash
+python -m kabupilot.cli set-market jp --refresh-watchlist
 ```

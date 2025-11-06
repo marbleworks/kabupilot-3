@@ -32,19 +32,22 @@ def cmd_init_db(args: argparse.Namespace) -> None:
     repository = _create_repository(db_path)
 
     # Seed watchlist from the knowledge base to help the Explorer agent.
-    knowledge = load_knowledge_base(args.market)
+    market = repository.get_market()
+    knowledge = load_knowledge_base(market)
     repository.replace_watchlist(
         WatchlistEntry(entry.symbol, f"Seed from knowledge base ({entry.sector})")
         for entry in knowledge[:5]
     )
 
-    print(f"Database initialised at {db_path}")
+    print(f"Database initialised at {db_path} (market={market})")
 
 
 def cmd_show_portfolio(args: argparse.Namespace) -> None:
     repository = _create_repository(args.db_path)
+    market = repository.get_market()
     snapshot = repository.portfolio_snapshot()
 
+    print(f"Configured market: {market}")
     print("Cash balance:", f"${snapshot.cash_balance:,.2f}")
     print("Positions:")
     if snapshot.positions:
@@ -81,7 +84,8 @@ def cmd_run_planner(args: argparse.Namespace) -> None:
 
 def cmd_run_daily(args: argparse.Namespace) -> None:
     repository = _create_repository(args.db_path)
-    knowledge = load_knowledge_base(args.market)
+    market = repository.get_market()
+    knowledge = load_knowledge_base(market)
     explorer = ExplorerAgent(repository, knowledge)
     researcher = ResearcherAgent(knowledge)
     leader = ResearchLeaderAgent(researcher)
@@ -89,7 +93,7 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
     updater = PortfolioUpdaterAgent(explorer, leader, decider, repository)
     checker = CheckerAgent(repository, knowledge)
 
-    print("Running daily portfolio update...\n")
+    print(f"Running daily portfolio update for market '{market}'...\n")
     result = updater.run()
 
     print("Explorer suggested symbols:")
@@ -110,6 +114,22 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
     print(summary)
 
 
+def cmd_set_market(args: argparse.Namespace) -> None:
+    repository = _create_repository(args.db_path)
+    repository.set_market(args.market)
+
+    if args.refresh_watchlist:
+        knowledge = load_knowledge_base(args.market)
+        repository.replace_watchlist(
+            WatchlistEntry(entry.symbol, f"Seed from knowledge base ({entry.sector})")
+            for entry in knowledge[:5]
+        )
+
+    print(f"Market updated to '{args.market}'")
+    if args.refresh_watchlist:
+        print("Watchlist refreshed from knowledge base")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="kabupilot backend CLI")
     parser.set_defaults(func=None)
@@ -120,13 +140,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=get_database_path(),
         help="Path to the SQLite database file.",
     )
-    parser.add_argument(
-        "--market",
-        choices=("jp", "us"),
-        default="jp",
-        help="Select the equity market focus (default: jp).",
-    )
-
     subparsers = parser.add_subparsers(dest="command")
 
     init_parser = subparsers.add_parser("init-db", help="Initialise the SQLite database")
@@ -153,6 +166,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Date for the checker summary (ISO format)",
     )
     daily_parser.set_defaults(func=cmd_run_daily)
+
+    market_parser = subparsers.add_parser(
+        "set-market",
+        help="Update the configured market and optionally refresh the watchlist",
+    )
+    market_parser.add_argument(
+        "market",
+        choices=("jp", "us"),
+        help="Market identifier to use for subsequent runs",
+    )
+    market_parser.add_argument(
+        "--refresh-watchlist",
+        action="store_true",
+        help="Re-seed the watchlist from the selected market's knowledge base",
+    )
+    market_parser.set_defaults(func=cmd_set_market)
 
     return parser
 

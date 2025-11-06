@@ -19,6 +19,59 @@ class PortfolioRepository:
         self._database_path = database_path
 
     # ------------------------------------------------------------------
+    # Settings management
+    # ------------------------------------------------------------------
+    def _ensure_settings_table(self) -> None:
+        with get_connection(self._database_path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            connection.commit()
+
+    def get_setting(self, key: str, *, default: str | None = None) -> str | None:
+        self._ensure_settings_table()
+        with get_connection(self._database_path) as connection:
+            row = connection.execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                if default is None:
+                    return None
+                connection.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?)",
+                    (key, default),
+                )
+                connection.commit()
+                return default
+            return str(row[0])
+
+    def set_setting(self, key: str, value: str) -> None:
+        self._ensure_settings_table()
+        with get_connection(self._database_path) as connection:
+            connection.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            connection.commit()
+
+    def get_market(self) -> str:
+        value = self.get_setting("market", default="jp")
+        assert value is not None
+        return value
+
+    def set_market(self, market: str) -> None:
+        if market not in {"jp", "us"}:
+            raise ValueError("Unsupported market; expected 'jp' or 'us'")
+        self.set_setting("market", market)
+
+    # ------------------------------------------------------------------
     # Portfolio primitives
     # ------------------------------------------------------------------
     def get_cash_balance(self) -> float:

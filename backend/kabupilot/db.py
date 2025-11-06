@@ -17,6 +17,12 @@ SCHEMA_STATEMENTS = (
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    """,
+    """
     CREATE TABLE IF NOT EXISTS positions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         symbol TEXT NOT NULL UNIQUE,
@@ -89,6 +95,10 @@ def initialize_database(path: str | Path | None = None, *, force: bool = False) 
         cursor.execute(
             "INSERT OR IGNORE INTO portfolio_meta (id, cash_balance) VALUES (1, ?)",
             (100000.0,),
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+            ("market", "jp"),
         )
         connection.commit()
     return database_path
