@@ -170,18 +170,94 @@ class CheckerAgent:
         snapshot = self.repository.portfolio_snapshot()
         total_value = snapshot.total_equity(lambda symbol: lookup_price(symbol))
 
-        explorer_result = None
+        def _coerce_explorer(value: object) -> ExplorerFinding | None:
+            if value is None:
+                return None
+            if isinstance(value, ExplorerFinding):
+                return value
+            if isinstance(value, dict):
+                symbols_raw = value.get("symbols", [])
+                if isinstance(symbols_raw, str):
+                    symbols = [symbols_raw]
+                else:
+                    symbols = list(symbols_raw or [])
+                rationale = str(value.get("rationale", ""))
+                return ExplorerFinding(symbols=symbols, rationale=rationale)
+            if isinstance(value, (list, tuple, set)):
+                return ExplorerFinding(symbols=list(value), rationale="")
+            return ExplorerFinding(symbols=[str(value)], rationale="")
+
+        def _coerce_research(items: object) -> Sequence[ResearchFinding]:
+            results: list[ResearchFinding] = []
+            if not items:
+                return results
+            if isinstance(items, str):
+                iterable: Sequence[object] = [items]
+            elif isinstance(items, Sequence):
+                iterable = items
+            else:
+                iterable = [items]
+            for item in iterable:
+                if isinstance(item, ResearchFinding):
+                    results.append(item)
+                elif isinstance(item, dict):
+                    symbol = str(item.get("symbol", ""))
+                    score_raw = item.get("score", 0.0)
+                    try:
+                        score = float(score_raw)
+                    except (TypeError, ValueError):
+                        score = 0.0
+                    rationale = str(item.get("rationale", ""))
+                    results.append(ResearchFinding(symbol=symbol, score=score, rationale=rationale))
+            return results
+
+        def _coerce_transactions(items: object) -> Sequence[Transaction]:
+            results: list[Transaction] = []
+            if not items:
+                return results
+            if isinstance(items, str):
+                iterable: Sequence[object] = [items]
+            elif isinstance(items, Sequence):
+                iterable = items
+            else:
+                iterable = [items]
+            for item in iterable:
+                if isinstance(item, Transaction):
+                    results.append(item)
+                elif isinstance(item, dict):
+                    kind = str(item.get("kind", ""))
+                    symbol = str(item.get("symbol", ""))
+                    try:
+                        shares = float(item.get("shares", 0.0))
+                    except (TypeError, ValueError):
+                        shares = 0.0
+                    try:
+                        price = float(item.get("price", 0.0))
+                    except (TypeError, ValueError):
+                        price = 0.0
+                    reason = str(item.get("reason", ""))
+                    results.append(
+                        Transaction(
+                            kind=kind,
+                            symbol=symbol,
+                            shares=shares,
+                            price=price,
+                            reason=reason,
+                        )
+                    )
+            return results
+
+        explorer_result: ExplorerFinding | None = None
         research_findings: Sequence[ResearchFinding] = []
         transactions: Sequence[Transaction] = []
         if daily_result:
-            explorer_result = daily_result.get("explorer")
-            research_findings = daily_result.get("research", [])
-            transactions = daily_result.get("transactions", [])
+            explorer_result = _coerce_explorer(daily_result.get("explorer"))
+            research_findings = _coerce_research(daily_result.get("research", []))
+            transactions = _coerce_transactions(daily_result.get("transactions", []))
 
+        explorer_symbols = list(explorer_result.symbols) if explorer_result else []
         explorer_summary = (
-            ", ".join(explorer_result.symbols)
-            if explorer_result and explorer_result.symbols
-            else "No symbols proposed"
+            ", ".join(explorer_symbols) if explorer_symbols else "No symbols proposed"
         )
         research_summary = (
             "; ".join(f"{finding.symbol}:{finding.score:.2f}" for finding in research_findings)
@@ -209,7 +285,7 @@ class CheckerAgent:
         ).strip()
 
         requests: list[str] = []
-        if explorer_result and not list(explorer_result.symbols):
+        if explorer_result and not explorer_symbols:
             requests.append("Explorer: expand symbol discovery to refill the pipeline.")
         if not transactions:
             requests.append("Decider: identify actionable trades to deploy capital.")
