@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Sequence
@@ -107,7 +109,6 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
     leader = ResearchLeaderAgent(researcher)
     decider = DeciderAgent(repository, knowledge)
     updater = PortfolioUpdaterAgent(explorer, leader, decider, repository)
-    checker = CheckerAgent(repository, knowledge, args.db_path)
 
     print(f"Running daily portfolio update for market '{market}'...\n")
     result = updater.run()
@@ -125,8 +126,47 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
     else:
         print("  (none)")
 
-    summary = checker.run(args.date, daily_result=result)
-    print("\nDaily checker summary:\n")
+    if args.result_path:
+        serializable_result = {
+            "explorer": asdict(result["explorer"]),
+            "research": [asdict(item) for item in result["research"]],
+            "transactions": [asdict(item) for item in result["transactions"]],
+        }
+        serializable_result["as_of"] = args.date.isoformat()
+        args.result_path.parent.mkdir(parents=True, exist_ok=True)
+        args.result_path.write_text(
+            json.dumps(serializable_result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"\nDaily result written to {args.result_path}")
+
+    print("\nRun the 'update-memo' command to refresh the shared memo once reviews are ready.")
+
+
+def cmd_update_memo(args: argparse.Namespace) -> None:
+    repository = _create_repository(args.db_path)
+    market = repository.get_market()
+    knowledge = load_knowledge_base(market, database_path=args.db_path)
+    checker = CheckerAgent(repository, knowledge, args.db_path)
+
+    daily_result = None
+    if args.result_path:
+        try:
+            with args.result_path.open("r", encoding="utf-8") as handle:
+                daily_result = json.load(handle)
+        except FileNotFoundError as error:
+            raise SystemExit(f"Daily result file not found: {args.result_path}") from error
+
+    as_of = args.date
+    if as_of is None and isinstance(daily_result, dict):
+        as_of_str = daily_result.get("as_of")
+        if as_of_str:
+            as_of = datetime.fromisoformat(as_of_str).date()
+    if as_of is None:
+        as_of = date.today()
+
+    summary = checker.run(as_of, daily_result=daily_result)
+    print("Shared memo updated with the following summary:\n")
     print(summary)
 
 
@@ -177,6 +217,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=date.today(),
         help="Date for the checker summary (ISO format)",
     )
+    daily_parser.add_argument(
+        "--result-path",
+        type=Path,
+        help="Optional path to write the updater result as JSON for memo updates.",
+    )
     daily_parser.set_defaults(func=cmd_run_daily)
 
     market_parser = subparsers.add_parser(
@@ -194,6 +239,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-seed the watchlist from the selected market's knowledge base",
     )
     market_parser.set_defaults(func=cmd_set_market)
+
+    memo_parser = subparsers.add_parser(
+        "update-memo",
+        help="Update the shared memo using the checker agent",
+    )
+    memo_parser.add_argument(
+        "--date",
+        type=lambda value: datetime.fromisoformat(value).date(),
+        help="Date associated with the memo update (ISO format)",
+    )
+    memo_parser.add_argument(
+        "--result-path",
+        type=Path,
+        help="Optional path to load a JSON daily result produced by 'run-daily'.",
+    )
+    memo_parser.set_defaults(func=cmd_update_memo)
 
     return parser
 

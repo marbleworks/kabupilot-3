@@ -31,13 +31,19 @@ pip install -r requirements.txt  # まだ requirements は不要ですが仮の�
    python -m kabupilot.cli run-planner
    ```
 
-3. 1 日のポートフォリオ更新フローを実行します。
+3. 1 日のポートフォリオ更新フローを実行します（結果をメモ更新用に保存することも可能です）。
 
    ```bash
-   python -m kabupilot.cli run-daily
+   python -m kabupilot.cli run-daily --result-path daily_result.json
    ```
 
-4. 現在のポートフォリオ状況を確認します。
+4. Checker エージェントで共有メモを更新します（`run-daily` で保存した結果を読み込みます）。
+
+   ```bash
+   python -m kabupilot.cli update-memo --result-path daily_result.json
+   ```
+
+5. 現在のポートフォリオ状況を確認します。
 
    ```bash
    python -m kabupilot.cli show-portfolio
@@ -46,7 +52,7 @@ pip install -r requirements.txt  # まだ requirements は不要ですが仮の�
 ### ナレッジベースについて
 
 * ナレッジベースはエージェント共有のメモとして `kabupilot.db` の `knowledge_documents` テーブルに保存されます。
-* `init-db` 実行時に市場ごとのテンプレートメモが作成され、日次の `run-daily` 実行後に Checker が各エージェントの活動サマリ・反省点・要求を反映します。
+* `init-db` 実行時に市場ごとのテンプレートメモが作成され、`update-memo` コマンドで Checker が各エージェントの活動サマリ・反省点・要求を反映します（`run-daily` で出力した JSON を渡すと詳細な日次結果を組み込めます）。
 * Explorer/Researcher などのエージェントはメモに記載された銘柄や要望を参照し、次回の動作に反映します。
 
 ### 市場設定の切り替え
