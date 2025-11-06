@@ -9,10 +9,13 @@ Python 3.11 以上を推奨します。
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+cd backend
 pip install -r requirements.txt  # まだ requirements は不要ですが仮の手順です
 ```
 
 ## CLI での動作確認
+
+以下のコマンドは `backend` ディレクトリ内で実行してください。
 
 1. SQLite データベースを初期化します。
 

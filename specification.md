@@ -11,7 +11,7 @@ AIエージェントが自動で株式ポートフォリオを運用する Web �
   * 1-1. バックエンド実装＋CLIで動作確認
     * SQLite を利用したポートフォリオ状態管理
     * Planner / Explorer / ResearchLeader / Decider / Checker の各エージェントを Python クラスとして実装
-    * `python -m kabupilot.cli` 経由で初期化・週次計画・日次実行・状態確認コマンドを提供
+    * バックエンド実装は `backend/kabupilot/` 配下に配置し、`python -m kabupilot.cli` 経由で初期化・週次計画・日次実行・状態確認コマンドを提供
   * 1-2. フロントエンド実装
 * 目標2：実環境（デプロイ）で動くものを作る
 
