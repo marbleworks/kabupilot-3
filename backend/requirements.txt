@@ -1,1 +1,1 @@
-# No external dependencies are required at this stage.
+yfinance>=0.2.40

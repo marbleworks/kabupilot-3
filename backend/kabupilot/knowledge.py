@@ -5,8 +5,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
+
+import yfinance as yf
 
 from .db import get_connection
 
@@ -283,13 +286,30 @@ def rewrite_memo_with_daily_digest(
     )
 
 
-def lookup_price(symbol: str, knowledge: Iterable[object] | None = None) -> float:
-    """Return a deterministic synthetic price for ``symbol``.
+@lru_cache(maxsize=128)
+def _latest_close_price(symbol: str) -> float:
+    """Return the most recent closing price fetched from yfinance."""
 
-    The memo no longer stores per-symbol fair values, so we fall back to a stable hash-based
-    price that keeps the simulator functional while agents rely on the shared memo for
-    qualitative coordination.
+    history = yf.Ticker(symbol).history(period="5d", interval="1d")
+    if history.empty:
+        raise ValueError(f"No price history returned for symbol '{symbol}'.")
+
+    closes = history.get("Close")
+    if closes is None or closes.dropna().empty:
+        raise ValueError(f"No closing prices available for symbol '{symbol}'.")
+
+    return float(closes.dropna().iloc[-1])
+
+
+def lookup_price(symbol: str, knowledge: Iterable[object] | None = None) -> float:
+    """Return the latest close price for ``symbol`` using yfinance.
+
+    If yfinance fails to provide a price, fall back to the synthetic deterministic value to keep
+    the simulator functional.
     """
 
     symbol = symbol.upper()
-    return (abs(hash(symbol)) % 40000) / 100 + 20
+    try:
+        return _latest_close_price(symbol)
+    except Exception:  # noqa: BLE001 - keep simulator running with deterministic fallback
+        return (abs(hash(symbol)) % 40000) / 100 + 20

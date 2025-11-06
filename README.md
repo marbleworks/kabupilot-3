@@ -13,6 +13,8 @@ cd backend
 pip install -r requirements.txt  # まだ requirements は不要ですが仮の手順です
 ```
 
+`requirements.txt` には yfinance が含まれており、実際の株価を取得するために利用します。
+
 ## CLI での動作確認
 
 以下のコマンドは `backend` ディレクトリ内で実行してください。
