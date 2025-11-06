@@ -25,6 +25,8 @@ AIエージェントが自動で株式ポートフォリオを運用する Web �
 
 * バックエンド：Python 3.11、FastAPI、APScheduler、SQLite（→ 後で PostgreSQL）、将来は Redis＋Dramatiq/Celery
 * フロントエンド：Next.js（App Router）、Tailwind CSS、Recharts
+* 株価取得API：まずは yfinance、将来は他APIへ置換可能な Provider アダプタ層
+* AIエージェント：openai と xai-sdk（Grok）、LLMプロバイダ抽象インターフェースを定義
 
 ## 5. 全体フロー（運用）
 
