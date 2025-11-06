@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from importlib import resources
 from typing import Iterable, Sequence
 
+MARKET_DATA_FILES: dict[str, str] = {
+    "jp": "data/knowledge_base_jp.json",
+    "us": "data/knowledge_base_us.json",
+}
+
 
 @dataclass(frozen=True)
 class KnowledgeEntry:
@@ -16,8 +21,25 @@ class KnowledgeEntry:
     fair_price: float
 
 
-def load_knowledge_base() -> Sequence[KnowledgeEntry]:
-    with resources.files(__package__).joinpath("data/knowledge_base.json").open("r", encoding="utf-8") as handle:
+def load_knowledge_base(market: str = "jp") -> Sequence[KnowledgeEntry]:
+    """Load the static knowledge base for the requested market.
+
+    Parameters
+    ----------
+    market:
+        Either ``"jp"`` (default) for Japanese equities or ``"us"`` for
+        U.S. equities.
+    """
+
+    normalized = market.lower()
+    try:
+        resource_name = MARKET_DATA_FILES[normalized]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported market '{market}'. Available markets: {', '.join(sorted(MARKET_DATA_FILES))}."
+        ) from exc
+
+    with resources.files(__package__).joinpath(resource_name).open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     return [
         KnowledgeEntry(

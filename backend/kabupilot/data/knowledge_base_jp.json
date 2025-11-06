@@ -1,0 +1,32 @@
+[
+  {
+    "symbol": "7203.T",
+    "sector": "Automotive",
+    "insight": "Toyota maintains strong hybrid leadership and resilient global supply chains.",
+    "fair_price": 2200.0
+  },
+  {
+    "symbol": "6758.T",
+    "sector": "Technology",
+    "insight": "Sony benefits from diversified entertainment and semiconductor image sensor demand.",
+    "fair_price": 13000.0
+  },
+  {
+    "symbol": "9432.T",
+    "sector": "Telecommunications",
+    "insight": "NTT Docomo offers stable cash flow with incremental growth from enterprise services.",
+    "fair_price": 3500.0
+  },
+  {
+    "symbol": "9984.T",
+    "sector": "Conglomerate",
+    "insight": "SoftBank Group's asset portfolio provides optionality but requires disciplined risk controls.",
+    "fair_price": 6000.0
+  },
+  {
+    "symbol": "8035.T",
+    "sector": "Semiconductors",
+    "insight": "Tokyo Electron rides wafer fab equipment demand supported by structural semiconductor investments.",
+    "fair_price": 23000.0
+  }
+]

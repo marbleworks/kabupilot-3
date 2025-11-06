@@ -32,7 +32,7 @@ def cmd_init_db(args: argparse.Namespace) -> None:
     repository = _create_repository(db_path)
 
     # Seed watchlist from the knowledge base to help the Explorer agent.
-    knowledge = load_knowledge_base()
+    knowledge = load_knowledge_base(args.market)
     repository.replace_watchlist(
         WatchlistEntry(entry.symbol, f"Seed from knowledge base ({entry.sector})")
         for entry in knowledge[:5]
@@ -81,7 +81,7 @@ def cmd_run_planner(args: argparse.Namespace) -> None:
 
 def cmd_run_daily(args: argparse.Namespace) -> None:
     repository = _create_repository(args.db_path)
-    knowledge = load_knowledge_base()
+    knowledge = load_knowledge_base(args.market)
     explorer = ExplorerAgent(repository, knowledge)
     researcher = ResearcherAgent(knowledge)
     leader = ResearchLeaderAgent(researcher)
@@ -119,6 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=get_database_path(),
         help="Path to the SQLite database file.",
+    )
+    parser.add_argument(
+        "--market",
+        choices=("jp", "us"),
+        default="jp",
+        help="Select the equity market focus (default: jp).",
     )
 
     subparsers = parser.add_subparsers(dest="command")
