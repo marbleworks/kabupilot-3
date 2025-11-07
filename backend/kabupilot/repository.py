@@ -194,6 +194,48 @@ class PortfolioRepository:
             watchlist=self.list_watchlist(),
         )
 
+    def _apply_buy(self, cursor, transaction: Transaction, position_row: tuple[float, float] | None) -> None:
+        new_shares = (position_row[0] if position_row else 0.0) + transaction.shares
+        if position_row:
+            prev_total = position_row[0] * position_row[1]
+            new_total = prev_total + transaction.shares * transaction.price
+            new_avg = new_total / new_shares
+        else:
+            new_avg = transaction.price
+        cursor.execute(
+            """
+            INSERT INTO positions (symbol, shares, avg_price) VALUES (?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET shares = excluded.shares, avg_price = excluded.avg_price
+            """,
+            (transaction.symbol, new_shares, new_avg),
+        )
+
+    def _apply_sell(self, cursor, transaction: Transaction, position_row: tuple[float, float] | None) -> None:
+        if position_row is None:
+            raise ValueError(f"Cannot sell {transaction.symbol}; no existing position")
+        remaining_shares = position_row[0] - transaction.shares
+        if remaining_shares < -1e-6:
+            raise ValueError(f"Cannot sell more shares than owned for {transaction.symbol}")
+        if remaining_shares <= 1e-6:
+            cursor.execute("DELETE FROM positions WHERE symbol = ?", (transaction.symbol,))
+        else:
+            cursor.execute(
+                "UPDATE positions SET shares = ? WHERE symbol = ?",
+                (remaining_shares, transaction.symbol),
+            )
+
+    def _log_transaction(self, cursor, transaction: Transaction) -> None:
+        cursor.execute(
+            "INSERT INTO activity_log (timestamp, agent, activity_type, summary, details) VALUES (?, ?, ?, ?, ?)",
+            (
+                datetime.utcnow().isoformat(),
+                "Decider",
+                f"transaction:{transaction.kind}",
+                f"{transaction.kind.upper()} {transaction.symbol}",
+                json.dumps(asdict(transaction)),
+            ),
+        )
+
     def apply_transactions(self, transactions: Sequence[Transaction]) -> None:
         if not transactions:
             return
@@ -219,44 +261,11 @@ class PortfolioRepository:
                 ).fetchone()
 
                 if tx.kind == "buy":
-                    new_shares = (position_row[0] if position_row else 0.0) + tx.shares
-                    if position_row:
-                        prev_total = position_row[0] * position_row[1]
-                        new_total = prev_total + tx.shares * tx.price
-                        new_avg = new_total / new_shares
-                    else:
-                        new_avg = tx.price
-                    cursor.execute(
-                        """
-                        INSERT INTO positions (symbol, shares, avg_price) VALUES (?, ?, ?)
-                        ON CONFLICT(symbol) DO UPDATE SET shares = excluded.shares, avg_price = excluded.avg_price
-                        """,
-                        (tx.symbol, new_shares, new_avg),
-                    )
-                else:  # sell
-                    if position_row is None:
-                        raise ValueError(f"Cannot sell {tx.symbol}; no existing position")
-                    remaining_shares = position_row[0] - tx.shares
-                    if remaining_shares < -1e-6:
-                        raise ValueError(f"Cannot sell more shares than owned for {tx.symbol}")
-                    if remaining_shares <= 1e-6:
-                        cursor.execute("DELETE FROM positions WHERE symbol = ?", (tx.symbol,))
-                    else:
-                        cursor.execute(
-                            "UPDATE positions SET shares = ? WHERE symbol = ?",
-                            (remaining_shares, tx.symbol),
-                        )
+                    self._apply_buy(cursor, tx, position_row)
+                else:
+                    self._apply_sell(cursor, tx, position_row)
 
-                cursor.execute(
-                    "INSERT INTO activity_log (timestamp, agent, activity_type, summary, details) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        datetime.utcnow().isoformat(),
-                        "Decider",
-                        f"transaction:{tx.kind}",
-                        f"{tx.kind.upper()} {tx.symbol}",
-                        json.dumps(asdict(tx)),
-                    ),
-                )
+                self._log_transaction(cursor, tx)
 
             cursor.execute(
                 "UPDATE portfolio_meta SET cash_balance = ? WHERE id = 1",
