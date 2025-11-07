@@ -120,6 +120,39 @@ def _record_activity(
     )
 
 
+class _StreamPrinter:
+    """Utility callable that writes streamed chunks to stdout."""
+
+    def __init__(self, label: str | None) -> None:
+        self._label = label
+        self.started = False
+        self._last_char = ""
+
+    def __call__(self, chunk: str) -> None:
+        if not chunk:
+            return
+        if not self.started:
+            prefix = f"\n[LLM:{self._label}] " if self._label else "\n[LLM] "
+            sys.stdout.write(prefix)
+            sys.stdout.flush()
+            self.started = True
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+        self._last_char = chunk[-1]
+
+    def finish(self, final_text: str | None = None) -> None:
+        if not self.started:
+            return
+        tail = ""
+        if final_text:
+            tail = final_text[-1:]
+        if not tail and self._last_char:
+            tail = self._last_char
+        if tail != "\n":
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+
 class LLMAgentMixin:
     """Utility helpers for agents that rely on an LLM provider."""
 
@@ -143,6 +176,30 @@ class LLMAgentMixin:
         if not text.endswith("\n"):
             sys.stdout.write("\n")
             sys.stdout.flush()
+
+    def _generate_with_streaming(
+        self,
+        provider: SupportsLLMGenerate,
+        messages: Sequence[ChatMessage],
+        *,
+        label: str | None = None,
+        **options: object,
+    ) -> str:
+        params = dict(options)
+        stream_printer: _StreamPrinter | None = None
+        if _STREAM_OUTPUT_ENABLED and getattr(provider, "supports_streaming", False):
+            stream_printer = _StreamPrinter(label)
+            params.setdefault("stream", True)
+            params["stream_consumer"] = stream_printer
+
+        text = provider.generate(messages, **params)
+
+        if stream_printer and stream_printer.started:
+            stream_printer.finish(text)
+        else:
+            self._stream_llm_output(text, label=label)
+
+        return text
 
     def _ensure_knowledge(
         self,
@@ -180,7 +237,12 @@ class LLMAgentMixin:
             ChatMessage("system", system_prompt.strip()),
             ChatMessage("user", user_prompt.strip()),
         ]
-        return self.provider.generate(messages, **options)
+        return self._generate_with_streaming(
+            self.provider,
+            messages,
+            label=options.pop("label", None),
+            **options,
+        )
 
     def _call_llm_json(
         self,
@@ -204,10 +266,10 @@ class LLMAgentMixin:
             raw = self._call_llm(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                label=schema_name,
                 text=text_options,
                 **options,
             )
-            self._stream_llm_output(raw, label=schema_name)
             data = _extract_json_dict(raw)
             return data, raw
         except (LLMProviderError, ValueError, json.JSONDecodeError) as exc:
@@ -398,15 +460,16 @@ class ExplorerAgent(LLMAgentMixin):
         }
 
         try:
-            raw_response = self.grok_provider.generate(
+            raw_response = self._generate_with_streaming(
+                self.grok_provider,
                 [
                     ChatMessage("system", system_prompt.strip()),
                     ChatMessage("user", user_prompt.strip()),
                 ],
+                label="ExplorerSuggestion",
                 grok_system_prompt=grok_system_prompt,
                 text=text_options,
             )
-            self._stream_llm_output(raw_response, label="ExplorerSuggestion")
             parsed = json.loads(raw_response)
             if not isinstance(parsed, dict):
                 raise ValueError("LLM response did not contain a JSON object")
@@ -502,15 +565,16 @@ class ResearcherAgent(LLMAgentMixin):
         }
 
         try:
-            raw = self.grok_provider.generate(
+            raw = self._generate_with_streaming(
+                self.grok_provider,
                 [
                     ChatMessage("system", system_prompt.strip()),
                     ChatMessage("user", user_prompt.strip()),
                 ],
+                label="ResearchScore",
                 grok_system_prompt=grok_system_prompt,
                 text=text_options,
             )
-            self._stream_llm_output(raw, label="ResearchScore")
             result = json.loads(raw)
             if not isinstance(result, dict):
                 raise ValueError("LLM response did not contain a JSON object")
