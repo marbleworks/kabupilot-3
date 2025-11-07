@@ -43,7 +43,6 @@ class SupportsLLMGenerate(Protocol):
     def generate(
         self,
         messages: Sequence[ChatMessage],
-        *,
         **options: object,
     ) -> str:
         ...
@@ -164,7 +163,6 @@ class OpenAIChatProvider(SupportsLLMGenerate):
     def generate(
         self,
         messages: Sequence[ChatMessage],
-        *,
         **options: object,
     ) -> str:
         params: dict[str, object] = {
@@ -282,7 +280,6 @@ class XAIChatProvider(SupportsLLMGenerate):
     def generate(
         self,
         messages: Sequence[ChatMessage],
-        *,
         **options: object,
     ) -> str:
         payload: dict[str, object] = {
@@ -437,7 +434,6 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
     def generate(
         self,
         messages: Sequence[ChatMessage],
-        *,
         **options: object,
     ) -> str:
         input_messages = [
