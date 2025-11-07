@@ -24,6 +24,8 @@ pip install -r requirements.txt  # まだ requirements は不要ですが仮の�
 | `XAI_BASE_URL` | 任意。自前のプロキシなど別エンドポイントを利用する場合に上書きします。|
 | `KABUPILOT_OPENAI_MODEL` | 任意。OpenAI 利用時のモデル名（デフォルトは `gpt-4o-mini`）。|
 | `KABUPILOT_XAI_MODEL` | 任意。xAI Grok 呼び出し時のモデル名（デフォルトは `grok-beta`）。|
+| `KABUPILOT_OPENAI_WEB_SEARCH` | 任意。`true`/`false` などで Web 検索ツールの有効・無効を切り替えます（デフォルトは有効）。|
+| `KABUPILOT_XAI_X_SEARCH` | 任意。`true`/`false` で Grok の X 検索ツール利用を切り替えます（デフォルトは有効）。|
 
 いずれも `export OPENAI_API_KEY=...` のようにシェル環境で設定してから CLI を実行してください。
 

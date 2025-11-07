@@ -7,6 +7,17 @@ import os
 from dataclasses import dataclass
 from typing import Iterable, Literal, Mapping, MutableMapping, Protocol, Sequence
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Return ``True`` when an environment variable is truthy."""
+
+    value = os.environ.get(name)
+    if value is None:
+        return default
+
+    normalised = value.strip().lower()
+    return normalised in {"1", "true", "yes", "on"}
+
 ChatRole = Literal["system", "user", "assistant"]
 
 
@@ -53,6 +64,7 @@ class OpenAIChatProvider(SupportsLLMGenerate):
         model: str = "gpt-4o-mini",
         api_key: str | None = None,
         organisation: str | None = None,
+        enable_web_search: bool | None = None,
     ) -> None:
         try:
             from openai import OpenAI  # type: ignore
@@ -69,6 +81,14 @@ class OpenAIChatProvider(SupportsLLMGenerate):
 
         self._client = OpenAI(api_key=key, organization=organisation)
         self._model = model
+
+        if enable_web_search is None:
+            enable_web_search = _env_flag("KABUPILOT_OPENAI_WEB_SEARCH", default=True)
+        self._tools: tuple[Mapping[str, object], ...] | None = (
+            ({"type": "web_search"},)
+            if enable_web_search
+            else None
+        )
 
     def _extract_output_text(self, response: object) -> str | None:
         output_text = getattr(response, "output_text", None)
@@ -155,6 +175,9 @@ class OpenAIChatProvider(SupportsLLMGenerate):
         if temperature is not None:
             params["temperature"] = float(temperature)
 
+        if self._tools:
+            params["tools"] = list(self._tools)
+
         for key in list(options):
             if key in self._RESPONSES_ALLOWED_OPTIONS:
                 params[key] = options.pop(key)
@@ -219,6 +242,7 @@ class XAIChatProvider(SupportsLLMGenerate):
         model: str = "grok-beta",
         api_key: str | None = None,
         base_url: str | None = None,
+        enable_x_search: bool | None = None,
     ) -> None:
         try:
             import requests
@@ -233,12 +257,27 @@ class XAIChatProvider(SupportsLLMGenerate):
                 "XAI_API_KEY environment variable is not set and no api_key was provided."
             )
 
+        if enable_x_search is None:
+            enable_x_search = _env_flag("KABUPILOT_XAI_X_SEARCH", default=True)
+
         self._session = requests.Session()
         self._session.headers.update(
             {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         )
         self._model = model
         self._base_url = base_url or os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1")
+        self._tools: tuple[Mapping[str, object], ...] | None = (
+            (
+                {
+                    "xSearch": {
+                        "enableImageUnderstanding": False,
+                        "enableVideoUnderstanding": False,
+                    }
+                },
+            )
+            if enable_x_search
+            else None
+        )
 
     def generate(
         self,
@@ -253,6 +292,8 @@ class XAIChatProvider(SupportsLLMGenerate):
         }
         if temperature is not None:
             payload["temperature"] = float(temperature)
+        if self._tools:
+            payload["tools"] = list(self._tools)
         if options:
             payload.update(options)
 
@@ -517,3 +558,4 @@ __all__ = [
     "XAIChatProvider",
     "OpenAIWithGrokToolProvider",
 ]
+
