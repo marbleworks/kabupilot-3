@@ -151,19 +151,19 @@ class LLMAgentMixin:
         **options: object,
     ) -> tuple[dict[str, object], str | None]:
         try:
-            response_format = {
-                "type": "json_schema",
-                "json_schema": {
+            text_options = {
+                "format": {
+                    "type": "json_schema",
                     "name": schema_name,
                     "schema": response_schema,
                     "strict": True,
-                },
+                }
             }
             raw = self._call_llm(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 temperature=temperature,
-                response_format=response_format,
+                text=text_options,
                 **options,
             )
             data = _extract_json_dict(raw)
@@ -347,13 +347,13 @@ class ExplorerAgent(LLMAgentMixin):
             """
         )
 
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
+        text_options = {
+            "format": {
+                "type": "json_schema",
                 "name": "ExplorerSuggestion",
                 "schema": explorer_schema,
                 "strict": True,
-            },
+            }
         }
 
         try:
@@ -365,7 +365,7 @@ class ExplorerAgent(LLMAgentMixin):
                 temperature=0.3,
                 grok_system_prompt=grok_system_prompt,
                 grok_temperature=0.2,
-                response_format=response_format,
+                text=text_options,
             )
             parsed = json.loads(raw_response)
             if not isinstance(parsed, dict):
@@ -444,9 +444,9 @@ class ResearcherAgent(LLMAgentMixin):
             or f"Baseline attractiveness applied for {symbol}; limited contextual insight available.",
         }
 
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
+        text_options = {
+            "format": {
+                "type": "json_schema",
                 "name": "ResearchScore",
                 "schema": {
                     "type": "object",
@@ -458,7 +458,7 @@ class ResearcherAgent(LLMAgentMixin):
                     "additionalProperties": False,
                 },
                 "strict": True,
-            },
+            }
         }
 
         try:
@@ -470,7 +470,7 @@ class ResearcherAgent(LLMAgentMixin):
                 temperature=0.4,
                 grok_system_prompt=grok_system_prompt,
                 grok_temperature=0.2,
-                response_format=response_format,
+                text=text_options,
             )
             result = json.loads(raw)
             if not isinstance(result, dict):

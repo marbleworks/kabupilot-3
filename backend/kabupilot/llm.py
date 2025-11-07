@@ -60,7 +60,7 @@ def _serialise_messages(messages: Iterable[ChatMessage]) -> list[Mapping[str, st
 class OpenAIChatProvider(SupportsLLMGenerate):
     """Wrapper around the official OpenAI Responses API client."""
 
-    _RESPONSES_ALLOWED_OPTIONS = {"max_output_tokens", "metadata", "response_format", "stop"}
+    _RESPONSES_ALLOWED_OPTIONS = {"max_output_tokens", "metadata", "stop", "text"}
 
     def __init__(
         self,
@@ -330,7 +330,7 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
     """OpenAI Responses client that can call xAI Grok as an external tool."""
 
     _TOOL_NAME = "grok_search"
-    _RESPONSES_ALLOWED_OPTIONS = {"max_output_tokens", "metadata", "response_format", "stop"}
+    _RESPONSES_ALLOWED_OPTIONS = {"max_output_tokens", "metadata", "stop", "text"}
 
     def __init__(
         self,
