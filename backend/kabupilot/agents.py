@@ -136,7 +136,11 @@ class LLMAgentMixin:
             ChatMessage("system", system_prompt.strip()),
             ChatMessage("user", user_prompt.strip()),
         ]
-        return self.provider.generate(messages, **options)
+        LOGGER.debug("LLM system prompt:\n%s", messages[0].content)
+        LOGGER.debug("LLM user prompt:\n%s", messages[1].content)
+        response = self.provider.generate(messages, **options)
+        LOGGER.debug("LLM response:\n%s", response)
+        return response
 
     def _call_llm_json(
         self,

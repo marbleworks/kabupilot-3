@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+import logging
 from typing import Iterable, Literal, Mapping, MutableMapping, Protocol, Sequence
 
 
 DEFAULT_OPENAI_CHAT_MODEL = "gpt-5"
 DEFAULT_XAI_GROK_MODEL = "grok-4-fast-reasoning"
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -396,6 +400,9 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
         if max_tokens is not None:
             payload["max_tokens"] = int(max_tokens)
 
+        LOGGER.debug("Grok system prompt:\n%s", system_prompt.strip())
+        LOGGER.debug("Grok query:\n%s", query.strip())
+
         response = self._session.post(
             f"{self._grok_base}{self._grok_chat_path}", json=payload, timeout=self._grok_timeout
         )
@@ -414,6 +421,7 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
             raise LLMProviderError("Malformed response from xAI Grok API") from exc
         if not content:
             raise LLMProviderError("xAI Grok API returned an empty message content")
+        LOGGER.debug("Grok response:\n%s", content)
         return content
 
     def _parse_tool_arguments(self, arguments: object) -> Mapping[str, object]:
