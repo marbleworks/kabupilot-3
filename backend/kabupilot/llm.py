@@ -465,62 +465,81 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
             return []
 
         calls: list[tuple[str, object]] = []
-        for item in output_items:
-            item_map = _as_mapping(item)
-            item_type = (item_map or {}).get("type") if item_map else getattr(item, "type", None)
-            if item_type != "tool_call":
-                continue
 
-            name = None
-            if item_map:
-                name = item_map.get("name") or item_map.get("tool_name")
-            if not name:
-                name = getattr(item, "name", None) or getattr(item, "tool_name", None)
+        def _capture_call(candidate: object) -> None:
+            candidate_map = _as_mapping(candidate)
+            if not candidate_map:
+                return
+
+            block_type = candidate_map.get("type") or getattr(candidate, "type", None)
+            if block_type != "tool_call":
+                return
+
+            name = (
+                candidate_map.get("name")
+                or candidate_map.get("tool_name")
+                or (
+                    candidate_map.get("function", {}).get("name")
+                    if isinstance(candidate_map.get("function"), Mapping)
+                    else None
+                )
+                or getattr(candidate, "name", None)
+                or getattr(candidate, "tool_name", None)
+            )
             if name != self._TOOL_NAME:
-                continue
+                return
 
-            call_id = None
-            if item_map:
-                call_id = (
-                    item_map.get("id")
-                    or item_map.get("call_id")
-                    or item_map.get("tool_call_id")
-                )
-            if not call_id:
-                call_id = (
-                    getattr(item, "id", None)
-                    or getattr(item, "call_id", None)
-                    or getattr(item, "tool_call_id", None)
-                )
+            call_id = (
+                candidate_map.get("id")
+                or candidate_map.get("call_id")
+                or candidate_map.get("tool_call_id")
+                or getattr(candidate, "id", None)
+                or getattr(candidate, "call_id", None)
+                or getattr(candidate, "tool_call_id", None)
+            )
             if not call_id:
                 raise LLMProviderError("Grok tool call missing identifier")
 
-            arguments = None
-            if item_map:
+            arguments = (
+                candidate_map.get("arguments")
+                or candidate_map.get("input")
+                or candidate_map.get("tool_input")
+            )
+            function = candidate_map.get("function")
+            if arguments is None and isinstance(function, Mapping):
                 arguments = (
-                    item_map.get("arguments")
-                    or item_map.get("input")
-                    or item_map.get("tool_input")
+                    function.get("arguments")
+                    or function.get("input")
+                    or function.get("tool_input")
                 )
-                if arguments is None and isinstance(item_map.get("content"), Sequence):
-                    for block in item_map["content"]:
-                        block_map = _as_mapping(block)
-                        if not block_map:
-                            continue
-                        arguments = (
-                            block_map.get("arguments")
-                            or block_map.get("input")
-                            or block_map.get("tool_input")
-                        )
-                        if arguments is not None:
-                            break
             if arguments is None:
                 arguments = (
-                    getattr(item, "arguments", None)
-                    or getattr(item, "input", None)
-                    or getattr(item, "tool_input", None)
+                    getattr(candidate, "arguments", None)
+                    or getattr(candidate, "input", None)
+                    or getattr(candidate, "tool_input", None)
                 )
+
             calls.append((str(call_id), arguments))
+
+        for item in output_items:
+            item_map = _as_mapping(item)
+            container_type = (
+                item_map.get("type") if item_map else getattr(item, "type", None)
+            )
+
+            if container_type == "tool_call":
+                _capture_call(item)
+                continue
+
+            if container_type != "message":
+                continue
+
+            content = item_map.get("content") if item_map else getattr(item, "content", None)
+            if not isinstance(content, Sequence) or isinstance(content, (str, bytes, bytearray)):
+                continue
+
+            for block in content:
+                _capture_call(block)
 
         return calls
 
