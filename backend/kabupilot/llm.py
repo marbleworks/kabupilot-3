@@ -43,7 +43,9 @@ def _serialise_messages(messages: Iterable[ChatMessage]) -> list[Mapping[str, st
 
 
 class OpenAIChatProvider(SupportsLLMGenerate):
-    """Wrapper around the official OpenAI client."""
+    """Wrapper around the official OpenAI Responses API client."""
+
+    _RESPONSES_ALLOWED_OPTIONS = {"max_output_tokens", "metadata", "response_format", "stop"}
 
     def __init__(
         self,
@@ -68,6 +70,74 @@ class OpenAIChatProvider(SupportsLLMGenerate):
         self._client = OpenAI(api_key=key, organization=organisation)
         self._model = model
 
+    def _extract_output_text(self, response: object) -> str | None:
+        output_text = getattr(response, "output_text", None)
+        if output_text:
+            return str(output_text)
+
+        output_items = getattr(response, "output", None)
+        if not output_items:
+            return None
+
+        def _as_mapping(value: object) -> Mapping[str, object] | None:
+            if isinstance(value, Mapping):
+                return value
+            model_dump = getattr(value, "model_dump", None)
+            if callable(model_dump):
+                try:
+                    dumped = model_dump()
+                except Exception:  # pragma: no cover - defensive
+                    return None
+                if isinstance(dumped, Mapping):
+                    return dumped
+            return None
+
+        text_parts: list[str] = []
+        for item in output_items:
+            item_map = _as_mapping(item)
+            if not item_map:
+                item_type = getattr(item, "type", None)
+                if item_type != "message":
+                    continue
+                contents = getattr(item, "content", None) or []
+            else:
+                if item_map.get("type") != "message":
+                    continue
+                contents = item_map.get("content") or []
+
+            for block in contents:
+                block_map = _as_mapping(block)
+                block_type = None
+                if block_map:
+                    block_type = block_map.get("type")
+                    if block_type == "output_text":
+                        text = block_map.get("text")
+                        if text:
+                            text_parts.append(str(text))
+                        continue
+                    if block_type == "text":
+                        text = block_map.get("text")
+                        if isinstance(text, Mapping):
+                            value = text.get("value")
+                            if value:
+                                text_parts.append(str(value))
+                        elif text:
+                            text_parts.append(str(text))
+                        continue
+
+                block_type = block_type or getattr(block, "type", None)
+                if block_type == "output_text":
+                    text_value = getattr(block, "text", None)
+                    if text_value:
+                        text_parts.append(str(text_value))
+                    continue
+                if block_type == "text":
+                    text_obj = getattr(block, "text", None)
+                    value = getattr(text_obj, "value", None)
+                    if value:
+                        text_parts.append(str(value))
+        return "".join(text_parts) if text_parts else None
+
     def generate(
         self,
         messages: Sequence[ChatMessage],
@@ -77,26 +147,33 @@ class OpenAIChatProvider(SupportsLLMGenerate):
     ) -> str:
         params: dict[str, object] = {
             "model": self._model,
-            "messages": _serialise_messages(messages),
+            "input": [
+                {"role": message.role, "content": message.content}
+                for message in messages
+            ],
         }
         if temperature is not None:
             params["temperature"] = float(temperature)
-        params.update(options)
 
-        response = self._client.chat.completions.create(**params)
-        try:
-            choice = response.choices[0]
-        except (AttributeError, IndexError) as exc:  # pragma: no cover - defensive
-            raise LLMProviderError("No choices returned from OpenAI API") from exc
-        message = getattr(choice, "message", None)
-        if message is None:
-            raise LLMProviderError("Malformed response from OpenAI API: missing message")
-        content = getattr(message, "content", None)
-        if not content:
+        for key in list(options):
+            if key in self._RESPONSES_ALLOWED_OPTIONS:
+                params[key] = options.pop(key)
+
+        if options:
+            unsupported = ", ".join(sorted(options))
             raise LLMProviderError(
-                "OpenAI API returned an empty message. Check your request parameters."
+                f"Unsupported options for OpenAIChatProvider: {unsupported}"
             )
-        return str(content)
+
+        try:
+            response = self._client.responses.create(**params)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise LLMProviderError(f"OpenAI Responses API call failed: {exc}") from exc
+
+        output_text = self._extract_output_text(response)
+        if not output_text:
+            raise LLMProviderError("OpenAI Responses API returned no output text")
+        return output_text
 
 
 class XAIChatProvider(SupportsLLMGenerate):
