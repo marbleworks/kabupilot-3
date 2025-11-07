@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -32,6 +34,29 @@ from .repository import PortfolioRepository
 LOGGER = logging.getLogger(__name__)
 
 _JSON_FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalised = value.strip().lower()
+    return normalised in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        return default
+    return parsed
+
+
+_STREAM_OUTPUT_ENABLED = _env_flag("KABUPILOT_STREAM_TERMINAL", default=True)
+_STREAM_CHUNK_SIZE = max(1, min(_env_int("KABUPILOT_STREAM_CHUNK_SIZE", 24), 200))
 
 
 def _extract_json_dict(text: str) -> dict[str, object]:
@@ -100,6 +125,25 @@ class LLMAgentMixin:
 
     provider: SupportsLLMGenerate
 
+    def _stream_llm_output(self, text: str, *, label: str | None = None) -> None:
+        """Stream LLM output text to the terminal if enabled."""
+
+        if not _STREAM_OUTPUT_ENABLED or not text:
+            return
+
+        prefix = f"\n[LLM:{label}] " if label else "\n[LLM] "
+        sys.stdout.write(prefix)
+        sys.stdout.flush()
+
+        for start in range(0, len(text), _STREAM_CHUNK_SIZE):
+            chunk = text[start : start + _STREAM_CHUNK_SIZE]
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+
+        if not text.endswith("\n"):
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
     def _ensure_knowledge(
         self,
         repository: PortfolioRepository,
@@ -163,6 +207,7 @@ class LLMAgentMixin:
                 text=text_options,
                 **options,
             )
+            self._stream_llm_output(raw, label=schema_name)
             data = _extract_json_dict(raw)
             return data, raw
         except (LLMProviderError, ValueError, json.JSONDecodeError) as exc:
@@ -361,6 +406,7 @@ class ExplorerAgent(LLMAgentMixin):
                 grok_system_prompt=grok_system_prompt,
                 text=text_options,
             )
+            self._stream_llm_output(raw_response, label="ExplorerSuggestion")
             parsed = json.loads(raw_response)
             if not isinstance(parsed, dict):
                 raise ValueError("LLM response did not contain a JSON object")
@@ -464,6 +510,7 @@ class ResearcherAgent(LLMAgentMixin):
                 grok_system_prompt=grok_system_prompt,
                 text=text_options,
             )
+            self._stream_llm_output(raw, label="ResearchScore")
             result = json.loads(raw)
             if not isinstance(result, dict):
                 raise ValueError("LLM response did not contain a JSON object")
