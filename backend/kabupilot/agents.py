@@ -313,104 +313,17 @@ class ResearcherAgent(LLMAgentMixin):
     knowledge: KnowledgeMemo | None = None
     grok_provider: SupportsLLMGenerate | None = None
 
-    def _query_grok(self, symbol: str, knowledge_context: str) -> str | None:
-        if self.grok_provider is None:
-            return None
-
-        if isinstance(self.grok_provider, OpenAIWithGrokToolProvider):
-            raise RuntimeError("Direct Grok queries are not supported with the tool provider")
-
-        system_prompt = dedent(
-            """
-            You are Grok from xAI acting as an external research tool.
-            Provide concise, factual intelligence about the requested equity.
-            Focus on recent news, catalysts, risks, and any notable valuation commentary.
-            Limit the response to five bullet points or fewer.
-            """
-        )
-        user_prompt = dedent(
-            f"""
-            Ticker: {symbol.upper()}
-            Memo context from the portfolio team:\n{knowledge_context or '(no memo excerpts provided)'}
-            Highlight material developments the primary analyst should know.
-            """
-        )
-
-        try:
-            response = self.grok_provider.generate(
-                [
-                    ChatMessage("system", system_prompt.strip()),
-                    ChatMessage("user", user_prompt.strip()),
-                ],
-                temperature=0.2,
+    def _score_with_grok_tool(self, symbol: str) -> ResearchFinding:
+        if not isinstance(self.grok_provider, OpenAIWithGrokToolProvider):
+            raise RuntimeError(
+                "ResearcherAgent requires an OpenAIWithGrokToolProvider for Grok access"
             )
-        except LLMProviderError as exc:
-            LOGGER.warning("Grok lookup failed for %s: %s", symbol, exc)
-            return None
 
-        cleaned = response.strip()
-        if len(cleaned) > 2000:
-            cleaned = cleaned[:2000]
-        return cleaned or None
-
-    def score_symbol(self, symbol: str) -> ResearchFinding:
         knowledge_context = ""
         if self.knowledge:
             context = find_symbol_context(symbol, self.knowledge)
             knowledge_context = context or self.knowledge.content[:1000]
 
-        if isinstance(self.grok_provider, OpenAIWithGrokToolProvider):
-            return self._score_with_grok_tool(symbol, knowledge_context)
-
-        grok_research = self._query_grok(symbol, knowledge_context)
-
-        system_prompt = dedent(
-            """
-            You are a research analyst evaluating a single equity.
-            Return a JSON object with keys: score (float between 0 and 1) and rationale (string).
-            Reference the shared memo context when relevant.
-            Leverage the external Grok research notes when they are provided.
-            """
-        )
-        user_prompt = dedent(
-            f"""
-            Symbol: {symbol.upper()}
-            Shared memo context:\n{knowledge_context}
-            External research (xAI Grok):\n{grok_research or 'No Grok insights available.'}
-            Provide a short investment thesis with upside/downside factors.
-            """
-        )
-
-        fallback_score = 0.55 + (abs(hash(symbol)) % 30) / 100
-        fallback = {
-            "score": min(1.0, round(fallback_score, 3)),
-            "rationale": knowledge_context
-            or grok_research
-            or f"Limited memo insight for {symbol}; baseline attractiveness applied.",
-        }
-
-        result, raw_response = self._call_llm_json(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            fallback=fallback,
-            temperature=0.4,
-        )
-
-        try:
-            score = float(result.get("score", fallback["score"]))
-        except (TypeError, ValueError):
-            score = float(fallback["score"])
-        score = max(0.0, min(1.0, score))
-
-        rationale = str(result.get("rationale") or fallback["rationale"])
-
-        finding = ResearchFinding(symbol=symbol.upper(), score=round(score, 3), rationale=rationale)
-
-        LOGGER.debug("Researcher result for %s: %s", symbol, result)
-
-        return finding
-
-    def _score_with_grok_tool(self, symbol: str, knowledge_context: str) -> ResearchFinding:
         assert isinstance(self.grok_provider, OpenAIWithGrokToolProvider)
 
         grok_system_prompt = dedent(
@@ -480,7 +393,7 @@ class ResearchLeaderAgent:
     researcher: ResearcherAgent
 
     def run(self, symbols: Iterable[str]) -> Sequence[ResearchFinding]:
-        findings = [self.researcher.score_symbol(symbol) for symbol in symbols]
+        findings = [self.researcher._score_with_grok_tool(symbol) for symbol in symbols]
         return findings
 
 
