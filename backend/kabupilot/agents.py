@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -32,6 +34,29 @@ from .repository import PortfolioRepository
 LOGGER = logging.getLogger(__name__)
 
 _JSON_FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalised = value.strip().lower()
+    return normalised in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        return default
+    return parsed
+
+
+_STREAM_OUTPUT_ENABLED = _env_flag("KABUPILOT_STREAM_TERMINAL", default=True)
+_STREAM_CHUNK_SIZE = max(1, min(_env_int("KABUPILOT_STREAM_CHUNK_SIZE", 24), 200))
 
 
 def _extract_json_dict(text: str) -> dict[str, object]:
@@ -95,10 +120,86 @@ def _record_activity(
     )
 
 
+class _StreamPrinter:
+    """Utility callable that writes streamed chunks to stdout."""
+
+    def __init__(self, label: str | None) -> None:
+        self._label = label
+        self.started = False
+        self._last_char = ""
+
+    def __call__(self, chunk: str) -> None:
+        if not chunk:
+            return
+        if not self.started:
+            prefix = f"\n[LLM:{self._label}] " if self._label else "\n[LLM] "
+            sys.stdout.write(prefix)
+            sys.stdout.flush()
+            self.started = True
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+        self._last_char = chunk[-1]
+
+    def finish(self, final_text: str | None = None) -> None:
+        if not self.started:
+            return
+        tail = ""
+        if final_text:
+            tail = final_text[-1:]
+        if not tail and self._last_char:
+            tail = self._last_char
+        if tail != "\n":
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+
 class LLMAgentMixin:
     """Utility helpers for agents that rely on an LLM provider."""
 
     provider: SupportsLLMGenerate
+
+    def _stream_llm_output(self, text: str, *, label: str | None = None) -> None:
+        """Stream LLM output text to the terminal if enabled."""
+
+        if not _STREAM_OUTPUT_ENABLED or not text:
+            return
+
+        prefix = f"\n[LLM:{label}] " if label else "\n[LLM] "
+        sys.stdout.write(prefix)
+        sys.stdout.flush()
+
+        for start in range(0, len(text), _STREAM_CHUNK_SIZE):
+            chunk = text[start : start + _STREAM_CHUNK_SIZE]
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+
+        if not text.endswith("\n"):
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+    def _generate_with_streaming(
+        self,
+        provider: SupportsLLMGenerate,
+        messages: Sequence[ChatMessage],
+        *,
+        label: str | None = None,
+        **options: object,
+    ) -> str:
+        params = dict(options)
+        stream_printer: _StreamPrinter | None = None
+        if _STREAM_OUTPUT_ENABLED and getattr(provider, "supports_streaming", False):
+            stream_printer = _StreamPrinter(label)
+            params.setdefault("stream", True)
+            params["stream_consumer"] = stream_printer
+
+        text = provider.generate(messages, **params)
+
+        if stream_printer and stream_printer.started:
+            stream_printer.finish(text)
+        else:
+            self._stream_llm_output(text, label=label)
+
+        return text
 
     def _ensure_knowledge(
         self,
@@ -136,7 +237,12 @@ class LLMAgentMixin:
             ChatMessage("system", system_prompt.strip()),
             ChatMessage("user", user_prompt.strip()),
         ]
-        return self.provider.generate(messages, **options)
+        return self._generate_with_streaming(
+            self.provider,
+            messages,
+            label=options.pop("label", None),
+            **options,
+        )
 
     def _call_llm_json(
         self,
@@ -160,6 +266,7 @@ class LLMAgentMixin:
             raw = self._call_llm(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                label=schema_name,
                 text=text_options,
                 **options,
             )
@@ -353,11 +460,13 @@ class ExplorerAgent(LLMAgentMixin):
         }
 
         try:
-            raw_response = self.grok_provider.generate(
+            raw_response = self._generate_with_streaming(
+                self.grok_provider,
                 [
                     ChatMessage("system", system_prompt.strip()),
                     ChatMessage("user", user_prompt.strip()),
                 ],
+                label="ExplorerSuggestion",
                 grok_system_prompt=grok_system_prompt,
                 text=text_options,
             )
@@ -456,11 +565,13 @@ class ResearcherAgent(LLMAgentMixin):
         }
 
         try:
-            raw = self.grok_provider.generate(
+            raw = self._generate_with_streaming(
+                self.grok_provider,
                 [
                     ChatMessage("system", system_prompt.strip()),
                     ChatMessage("user", user_prompt.strip()),
                 ],
+                label="ResearchScore",
                 grok_system_prompt=grok_system_prompt,
                 text=text_options,
             )

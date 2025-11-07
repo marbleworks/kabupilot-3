@@ -83,6 +83,7 @@ class OpenAIChatProvider(SupportsLLMGenerate):
 
         self._client = OpenAI(api_key=key, organization=organisation)
         self._model = model
+        self.supports_streaming = True
 
         if enable_web_search is None:
             enable_web_search = _env_flag("KABUPILOT_OPENAI_WEB_SEARCH", default=True)
@@ -101,19 +102,6 @@ class OpenAIChatProvider(SupportsLLMGenerate):
         if not output_items:
             return None
 
-        def _as_mapping(value: object) -> Mapping[str, object] | None:
-            if isinstance(value, Mapping):
-                return value
-            model_dump = getattr(value, "model_dump", None)
-            if callable(model_dump):
-                try:
-                    dumped = model_dump()
-                except Exception:  # pragma: no cover - defensive
-                    return None
-                if isinstance(dumped, Mapping):
-                    return dumped
-            return None
-
         text_parts: list[str] = []
         for item in output_items:
             item_map = _as_mapping(item)
@@ -129,35 +117,11 @@ class OpenAIChatProvider(SupportsLLMGenerate):
 
             for block in contents:
                 block_map = _as_mapping(block)
-                block_type = None
-                if block_map:
-                    block_type = block_map.get("type")
-                    if block_type == "output_text":
-                        text = block_map.get("text")
-                        if text:
-                            text_parts.append(str(text))
-                        continue
-                    if block_type == "text":
-                        text = block_map.get("text")
-                        if isinstance(text, Mapping):
-                            value = text.get("value")
-                            if value:
-                                text_parts.append(str(value))
-                        elif text:
-                            text_parts.append(str(text))
-                        continue
-
-                block_type = block_type or getattr(block, "type", None)
-                if block_type == "output_text":
-                    text_value = getattr(block, "text", None)
-                    if text_value:
-                        text_parts.append(str(text_value))
-                    continue
-                if block_type == "text":
-                    text_obj = getattr(block, "text", None)
-                    value = getattr(text_obj, "value", None)
-                    if value:
-                        text_parts.append(str(value))
+                block_type = block_map.get("type") if block_map else getattr(block, "type", None)
+                if block_type in {"output_text", "text"}:
+                    text = _normalise_stream_chunk(block_map or block)
+                    if text:
+                        text_parts.append(text)
         return "".join(text_parts) if text_parts else None
 
     def generate(
@@ -165,6 +129,12 @@ class OpenAIChatProvider(SupportsLLMGenerate):
         messages: Sequence[ChatMessage],
         **options: object,
     ) -> str:
+        options = dict(options)
+        stream_consumer = options.pop("stream_consumer", None)
+        if stream_consumer is not None and not callable(stream_consumer):
+            raise LLMProviderError("stream_consumer must be callable when provided")
+        stream = bool(options.pop("stream", False))
+
         params: dict[str, object] = {
             "model": self._model,
             "input": [
@@ -186,6 +156,48 @@ class OpenAIChatProvider(SupportsLLMGenerate):
                 f"Unsupported options for OpenAIChatProvider: {unsupported}"
             )
 
+        if stream:
+            params["stream"] = True
+            try:
+                stream_response = self._client.responses.create(**params)
+            except Exception as exc:  # pragma: no cover - defensive
+                raise LLMProviderError(
+                    f"OpenAI Responses API stream failed to start: {exc}"
+                ) from exc
+
+            chunks: list[str] = []
+            final_response: object | None = getattr(stream_response, "response", None)
+
+            try:
+                for event in stream_response:
+                    chunk = self._extract_stream_event_text(event)
+                    if chunk:
+                        chunks.append(chunk)
+                        if stream_consumer:
+                            try:
+                                stream_consumer(chunk)
+                            except Exception:  # pragma: no cover - defensive
+                                pass
+                    response_obj = getattr(event, "response", None)
+                    if response_obj:
+                        final_response = response_obj
+            except Exception as exc:  # pragma: no cover - defensive
+                raise LLMProviderError(
+                    f"OpenAI Responses API stream failed: {exc}"
+                ) from exc
+
+            if not chunks and final_response is not None:
+                fallback_text = self._extract_output_text(final_response)
+                if fallback_text:
+                    chunks.append(fallback_text)
+
+            if not chunks:
+                raise LLMProviderError(
+                    "OpenAI Responses API stream produced no output text"
+                )
+
+            return "".join(chunks)
+
         try:
             response = self._client.responses.create(**params)
         except Exception as exc:  # pragma: no cover - defensive
@@ -194,7 +206,30 @@ class OpenAIChatProvider(SupportsLLMGenerate):
         output_text = self._extract_output_text(response)
         if not output_text:
             raise LLMProviderError("OpenAI Responses API returned no output text")
+        if stream_consumer:
+            try:
+                stream_consumer(output_text)
+            except Exception:  # pragma: no cover - defensive
+                pass
         return output_text
+
+    def _extract_stream_event_text(self, event: object) -> str | None:
+        """Extract incremental text from a streaming Responses event."""
+
+        mapping = _as_mapping(event)
+        if mapping:
+            event_type = mapping.get("type")
+            if isinstance(event_type, str) and event_type == "response.completed":
+                response_obj = mapping.get("response")
+                if response_obj is not None:
+                    text = self._extract_output_text(response_obj)
+                    if text:
+                        return text
+        chunk = _normalise_stream_chunk(event)
+        if chunk:
+            return chunk
+        delta = getattr(event, "delta", None)
+        return _normalise_stream_chunk(delta)
 
 
 def _extract_xai_text(content: object) -> str | None:
@@ -264,6 +299,7 @@ class XAIChatProvider(SupportsLLMGenerate):
         )
         self._model = model
         self._base_url = base_url or os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1")
+        self.supports_streaming = False
         self._tools: tuple[Mapping[str, object], ...] | None = (
             (
                 {
@@ -378,6 +414,7 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
         self._session.headers.update(
             {"Authorization": f"Bearer {xai_key}", "Content-Type": "application/json"}
         )
+        self.supports_streaming = False
 
     def _call_grok(
         self,
@@ -535,4 +572,69 @@ __all__ = [
     "XAIChatProvider",
     "OpenAIWithGrokToolProvider",
 ]
+
+def _as_mapping(value: object) -> Mapping[str, object] | None:
+    if isinstance(value, Mapping):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump()
+        except Exception:  # pragma: no cover - defensive
+            return None
+        if isinstance(dumped, Mapping):
+            return dumped
+    return None
+
+
+def _extract_text_value(value: object) -> str | None:
+    if isinstance(value, str):
+        return value
+
+    mapping = _as_mapping(value)
+    if mapping:
+        for key in ("text", "value", "content"):
+            candidate = mapping.get(key)
+            if isinstance(candidate, str):
+                return candidate
+        nested = mapping.get("output_text")
+        if isinstance(nested, str):
+            return nested
+        candidate = mapping.get("output")
+        if isinstance(candidate, str):
+            return candidate
+
+    text_attr = getattr(value, "text", None)
+    if isinstance(text_attr, str):
+        return text_attr
+    value_attr = getattr(value, "value", None)
+    if isinstance(value_attr, str):
+        return value_attr
+
+    return None
+
+
+def _normalise_stream_chunk(value: object) -> str | None:
+    text = _extract_text_value(value)
+    if text:
+        return text
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        parts: list[str] = []
+        for item in value:
+            piece = _normalise_stream_chunk(item)
+            if piece:
+                parts.append(piece)
+        if parts:
+            return "".join(parts)
+
+    mapping = _as_mapping(value)
+    if mapping:
+        for key in ("delta", "message", "content"):
+            candidate = mapping.get(key)
+            piece = _normalise_stream_chunk(candidate)
+            if piece:
+                return piece
+
+    return None
 
