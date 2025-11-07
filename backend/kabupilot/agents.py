@@ -563,7 +563,7 @@ class DeciderAgent(LLMAgentMixin):
                             "shares": {"type": "number"},
                             "reason": {"type": "string"},
                         },
-                        "required": ["kind", "symbol", "shares"],
+                        "required": ["kind", "symbol", "shares", "reason"],
                         "additionalProperties": False,
                     },
                 },
