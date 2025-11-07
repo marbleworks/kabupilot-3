@@ -193,7 +193,7 @@ class OpenAIChatProvider(SupportsLLMGenerate):
             )
 
         try:
-            response = self._client.chat.responses.create(**params)
+            response = self._client.responses.create(**params)
         except Exception as exc:  # pragma: no cover - defensive
             raise LLMProviderError(f"OpenAI Responses API call failed: {exc}") from exc
 
@@ -509,7 +509,7 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
             )
 
         try:
-            initial = self._client.chat.responses.create(**params)
+            initial = self._client.responses.create(**params)
         except Exception as exc:  # pragma: no cover - defensive
             raise LLMProviderError(f"OpenAI Responses API call failed: {exc}") from exc
 
