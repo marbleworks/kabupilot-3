@@ -456,20 +456,18 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
             "tools": [
                 {
                     "type": "function",
-                    "function": {
-                        "name": self._TOOL_NAME,
-                        "description": "Send a query to xAI Grok and return its textual answer.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "query": {
-                                    "type": "string",
-                                    "description": "User question to forward to Grok.",
-                                }
-                            },
-                            "required": ["query"],
-                            "additionalProperties": False,
+                    "name": self._TOOL_NAME,
+                    "description": "Send a query to xAI Grok and return its textual answer.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "User question to forward to Grok.",
+                            }
                         },
+                        "required": ["query"],
+                        "additionalProperties": False,
                     },
                 }
             ],
