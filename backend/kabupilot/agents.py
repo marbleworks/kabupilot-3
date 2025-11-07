@@ -100,6 +100,31 @@ class LLMAgentMixin:
 
     provider: SupportsLLMGenerate
 
+    def _ensure_knowledge(
+        self,
+        repository: PortfolioRepository,
+        *,
+        database_path: str | Path | None = None,
+    ) -> KnowledgeMemo:
+        """Load and cache the shared knowledge memo for a repository."""
+
+        knowledge = self.knowledge  # type: ignore[attr-defined]
+        if knowledge is None:
+            market = repository.get_market()
+            try:
+                knowledge = load_knowledge_base(market, database_path=database_path)
+            except Exception:  # pragma: no cover - fallback when DB not available
+                knowledge = KnowledgeMemo(
+                    market=market,
+                    content="",
+                    updated_at=datetime.utcnow(),
+                    editor="unknown",
+                )
+
+            self.knowledge = knowledge  # type: ignore[attr-defined]
+
+        return knowledge
+
     def _call_llm(
         self,
         *,
@@ -156,19 +181,7 @@ class PlannerAgent(LLMAgentMixin):
 
     def run(self, week_start: date) -> Goal:
         snapshot = self.repository.portfolio_snapshot()
-        knowledge = self.knowledge
-        if knowledge is None:
-            try:
-                knowledge = load_knowledge_base(self.repository.get_market())
-            except Exception:  # pragma: no cover - fallback when DB not available
-                knowledge = KnowledgeMemo(
-                    market=self.repository.get_market(),
-                    content="",
-                    updated_at=datetime.utcnow(),
-                    editor="unknown",
-                )
-
-        self.knowledge = knowledge
+        knowledge = self._ensure_knowledge(self.repository)
 
         system_prompt = dedent(
             """
@@ -275,19 +288,7 @@ class ExplorerAgent(LLMAgentMixin):
 
     def run(self) -> ExplorerFinding:
         snapshot = self.repository.portfolio_snapshot()
-        knowledge = self.knowledge
-        if knowledge is None:
-            try:
-                knowledge = load_knowledge_base(self.repository.get_market())
-            except Exception:  # pragma: no cover - fallback when DB not available
-                knowledge = KnowledgeMemo(
-                    market=self.repository.get_market(),
-                    content="",
-                    updated_at=datetime.utcnow(),
-                    editor="unknown",
-                )
-
-        self.knowledge = knowledge
+        knowledge = self._ensure_knowledge(self.repository)
 
         suggested = symbols_from_memo(knowledge)
 
@@ -513,18 +514,7 @@ class DeciderAgent(LLMAgentMixin):
             return []
 
         snapshot = self.repository.portfolio_snapshot()
-        knowledge = self.knowledge
-        if knowledge is None:
-            try:
-                knowledge = load_knowledge_base(self.repository.get_market())
-            except Exception:  # pragma: no cover
-                knowledge = KnowledgeMemo(
-                    market=self.repository.get_market(),
-                    content="",
-                    updated_at=datetime.utcnow(),
-                    editor="unknown",
-                )
-        self.knowledge = knowledge
+        knowledge = self._ensure_knowledge(self.repository)
 
         findings_payload = [
             {"symbol": item.symbol, "score": item.score, "rationale": item.rationale}
