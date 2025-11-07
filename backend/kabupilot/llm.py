@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from typing import Iterable, Literal, Mapping, MutableMapping, Protocol, Sequence
 
 
+DEFAULT_OPENAI_CHAT_MODEL = "gpt-5"
+DEFAULT_XAI_GROK_MODEL = "grok-4-fast-reasoning"
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     """Return ``True`` when an environment variable is truthy."""
 
@@ -61,7 +65,7 @@ class OpenAIChatProvider(SupportsLLMGenerate):
     def __init__(
         self,
         *,
-        model: str = "gpt-4o-mini",
+        model: str = DEFAULT_OPENAI_CHAT_MODEL,
         api_key: str | None = None,
         organisation: str | None = None,
         enable_web_search: bool | None = None,
@@ -239,7 +243,7 @@ class XAIChatProvider(SupportsLLMGenerate):
     def __init__(
         self,
         *,
-        model: str = "grok-beta",
+        model: str = DEFAULT_XAI_GROK_MODEL,
         api_key: str | None = None,
         base_url: str | None = None,
         enable_x_search: bool | None = None,
@@ -331,10 +335,10 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
     def __init__(
         self,
         *,
-        model: str = "gpt-4.1",
+        model: str = DEFAULT_OPENAI_CHAT_MODEL,
         api_key: str | None = None,
         organisation: str | None = None,
-        grok_model: str = "grok-4",
+        grok_model: str = DEFAULT_XAI_GROK_MODEL,
         grok_api_key: str | None = None,
         grok_base: str | None = None,
         grok_chat_path: str = "/v1/chat/completions",

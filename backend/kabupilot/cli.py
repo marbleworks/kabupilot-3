@@ -24,6 +24,8 @@ from .config import get_database_path
 from .db import initialize_database
 from .knowledge import KnowledgeMemo, ensure_seed_knowledge, load_knowledge_base
 from .llm import (
+    DEFAULT_OPENAI_CHAT_MODEL,
+    DEFAULT_XAI_GROK_MODEL,
     LLMProviderError,
     OpenAIChatProvider,
     OpenAIWithGrokToolProvider,
@@ -67,7 +69,7 @@ def _create_repository(db_path: str | Path | None) -> PortfolioRepository:
 
 
 def _create_gpt_provider() -> SupportsLLMGenerate:
-    model = os.environ.get("KABUPILOT_OPENAI_MODEL", "gpt-4o-mini")
+    model = os.environ.get("KABUPILOT_OPENAI_MODEL", DEFAULT_OPENAI_CHAT_MODEL)
     organisation = os.environ.get("OPENAI_ORG")
     return OpenAIChatProvider(model=model, organisation=organisation)
 
@@ -76,9 +78,9 @@ def _create_grok_tool_provider() -> SupportsLLMGenerate | None:
     try:
         model = os.environ.get(
             "KABUPILOT_OPENAI_TOOL_MODEL",
-            os.environ.get("KABUPILOT_OPENAI_MODEL", "gpt-4.1"),
+            os.environ.get("KABUPILOT_OPENAI_MODEL", DEFAULT_OPENAI_CHAT_MODEL),
         )
-        grok_model = os.environ.get("KABUPILOT_XAI_MODEL", "grok-4")
+        grok_model = os.environ.get("KABUPILOT_XAI_MODEL", DEFAULT_XAI_GROK_MODEL)
         organisation = os.environ.get("OPENAI_ORG")
         return OpenAIWithGrokToolProvider(
             model=model,
