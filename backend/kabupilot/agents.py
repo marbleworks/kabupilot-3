@@ -20,7 +20,12 @@ from .knowledge import (
     symbols_from_memo,
     update_knowledge_memo,
 )
-from .llm import ChatMessage, LLMProviderError, SupportsLLMGenerate
+from .llm import (
+    ChatMessage,
+    LLMProviderError,
+    OpenAIWithGrokToolProvider,
+    SupportsLLMGenerate,
+)
 from .models import ActivityLog, ExplorerFinding, Goal, ResearchFinding, Transaction
 from .repository import PortfolioRepository
 
@@ -115,14 +120,25 @@ class LLMAgentMixin:
         system_prompt: str,
         user_prompt: str,
         fallback: dict[str, object],
+        schema_name: str,
+        response_schema: dict[str, object],
         temperature: float = 0.2,
         **options: object,
     ) -> tuple[dict[str, object], str | None]:
         try:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "schema": response_schema,
+                    "strict": True,
+                },
+            }
             raw = self._call_llm(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 temperature=temperature,
+                response_format=response_format,
                 **options,
             )
             data = _extract_json_dict(raw)
@@ -157,9 +173,8 @@ class PlannerAgent(LLMAgentMixin):
         system_prompt = dedent(
             """
             You are the planning agent for an autonomous portfolio manager.
-            Analyse the provided context and propose a concise weekly objective.
-            Respond in JSON with keys: objective (string), focus_areas (list of strings),
-            risk_checks (list of strings), and suggested_metrics (list of strings).
+            Analyse the provided context and propose a concise weekly objective along with
+            focus areas, risk checks, and metrics to monitor for the upcoming week.
             """
         )
         user_prompt = dedent(
@@ -186,10 +201,33 @@ class PlannerAgent(LLMAgentMixin):
             "suggested_metrics": ["net_cash_usage", "new_ideas_identified"],
         }
 
+        plan_schema = {
+            "type": "object",
+            "properties": {
+                "objective": {"type": "string"},
+                "focus_areas": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "risk_checks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "suggested_metrics": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["objective", "focus_areas", "risk_checks", "suggested_metrics"],
+            "additionalProperties": False,
+        }
+
         plan, raw_response = self._call_llm_json(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             fallback=fallback,
+            schema_name="PlannerGoal",
+            response_schema=plan_schema,
             temperature=0.15,
         )
 
@@ -255,8 +293,8 @@ class ExplorerAgent(LLMAgentMixin):
         system_prompt = dedent(
             """
             You discover equity symbols to investigate next.
-            Propose up to five tickers prioritising diversification and current requests.
-            Respond in JSON with keys: symbols (list of strings) and rationale (string).
+            Propose up to five tickers prioritising diversification and current requests,
+            and include a succinct rationale for the selection.
             """
         )
         user_prompt = dedent(
@@ -275,10 +313,25 @@ class ExplorerAgent(LLMAgentMixin):
             "rationale": "Rotating through watchlist names and memo highlights to maintain research cadence.",
         }
 
+        explorer_schema = {
+            "type": "object",
+            "properties": {
+                "symbols": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "rationale": {"type": "string"},
+            },
+            "required": ["symbols", "rationale"],
+            "additionalProperties": False,
+        }
+
         result, raw_response = self._call_llm_json(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             fallback=fallback,
+            schema_name="ExplorerSuggestion",
+            response_schema=explorer_schema,
             temperature=0.25,
         )
 
@@ -308,65 +361,40 @@ class ResearcherAgent(LLMAgentMixin):
     knowledge: KnowledgeMemo | None = None
     grok_provider: SupportsLLMGenerate | None = None
 
-    def _query_grok(self, symbol: str, knowledge_context: str) -> str | None:
-        if self.grok_provider is None:
-            return None
-
-        system_prompt = dedent(
-            """
-            You are Grok from xAI acting as an external research tool.
-            Provide concise, factual intelligence about the requested equity.
-            Focus on recent news, catalysts, risks, and any notable valuation commentary.
-            Limit the response to five bullet points or fewer.
-            """
-        )
-        user_prompt = dedent(
-            f"""
-            Ticker: {symbol.upper()}
-            Memo context from the portfolio team:\n{knowledge_context or '(no memo excerpts provided)'}
-            Highlight material developments the primary analyst should know.
-            """
-        )
-
-        try:
-            response = self.grok_provider.generate(
-                [
-                    ChatMessage("system", system_prompt.strip()),
-                    ChatMessage("user", user_prompt.strip()),
-                ],
-                temperature=0.2,
+    def _score_with_grok_tool(self, symbol: str) -> ResearchFinding:
+        if not isinstance(self.grok_provider, OpenAIWithGrokToolProvider):
+            raise RuntimeError(
+                "ResearcherAgent requires an OpenAIWithGrokToolProvider for Grok access"
             )
-        except LLMProviderError as exc:
-            LOGGER.warning("Grok lookup failed for %s: %s", symbol, exc)
-            return None
 
-        cleaned = response.strip()
-        if len(cleaned) > 2000:
-            cleaned = cleaned[:2000]
-        return cleaned or None
-
-    def score_symbol(self, symbol: str) -> ResearchFinding:
         knowledge_context = ""
         if self.knowledge:
             context = find_symbol_context(symbol, self.knowledge)
             knowledge_context = context or self.knowledge.content[:1000]
 
-        grok_research = self._query_grok(symbol, knowledge_context)
+        assert isinstance(self.grok_provider, OpenAIWithGrokToolProvider)
+
+        grok_system_prompt = dedent(
+            """
+            You are Grok from xAI acting as an external research assistant.
+            Return at most five bullet points highlighting timely catalysts, risks, or valuation notes.
+            Focus on factual developments that would aid an equity analyst.
+            """
+        ).strip()
 
         system_prompt = dedent(
             """
-            You are a research analyst evaluating a single equity.
-            Return a JSON object with keys: score (float between 0 and 1) and rationale (string).
-            Reference the shared memo context when relevant.
-            Leverage the external Grok research notes when they are provided.
+            You are the primary equity analyst for an autonomous portfolio manager.
+            When you need fresh market intelligence, call the grok_search tool to consult xAI Grok.
+            After reviewing all context, deliver a conviction score between 0 and 1 with a supporting rationale,
+            integrating insights from both the shared memo and any Grok findings.
             """
         )
         user_prompt = dedent(
             f"""
             Symbol: {symbol.upper()}
-            Shared memo context:\n{knowledge_context}
-            External research (xAI Grok):\n{grok_research or 'No Grok insights available.'}
-            Provide a short investment thesis with upside/downside factors.
+            Shared memo context:\n{knowledge_context or '(no memo excerpts available)'}
+            Evaluate the current attractiveness of the name and summarise the thesis.
             """
         )
 
@@ -374,16 +402,43 @@ class ResearcherAgent(LLMAgentMixin):
         fallback = {
             "score": min(1.0, round(fallback_score, 3)),
             "rationale": knowledge_context
-            or grok_research
-            or f"Limited memo insight for {symbol}; baseline attractiveness applied.",
+            or f"Baseline attractiveness applied for {symbol}; limited contextual insight available.",
         }
 
-        result, raw_response = self._call_llm_json(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            fallback=fallback,
-            temperature=0.4,
-        )
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "ResearchScore",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "score": {"type": "number"},
+                        "rationale": {"type": "string"},
+                    },
+                    "required": ["score", "rationale"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        }
+
+        try:
+            raw = self.grok_provider.generate(
+                [
+                    ChatMessage("system", system_prompt.strip()),
+                    ChatMessage("user", user_prompt.strip()),
+                ],
+                temperature=0.4,
+                grok_system_prompt=grok_system_prompt,
+                grok_temperature=0.2,
+                response_format=response_format,
+            )
+            result = json.loads(raw)
+            if not isinstance(result, dict):
+                raise ValueError("LLM response did not contain a JSON object")
+        except (LLMProviderError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.warning("Tool-enabled research failed for %s: %s", symbol, exc)
+            result = fallback
 
         try:
             score = float(result.get("score", fallback["score"]))
@@ -395,7 +450,7 @@ class ResearcherAgent(LLMAgentMixin):
 
         finding = ResearchFinding(symbol=symbol.upper(), score=round(score, 3), rationale=rationale)
 
-        LOGGER.debug("Researcher result for %s: %s", symbol, result)
+        LOGGER.debug("Researcher tool result for %s: %s", symbol, result)
 
         return finding
 
@@ -405,7 +460,7 @@ class ResearchLeaderAgent:
     researcher: ResearcherAgent
 
     def run(self, symbols: Iterable[str]) -> Sequence[ResearchFinding]:
-        findings = [self.researcher.score_symbol(symbol) for symbol in symbols]
+        findings = [self.researcher._score_with_grok_tool(symbol) for symbol in symbols]
         return findings
 
 
@@ -441,10 +496,8 @@ class DeciderAgent(LLMAgentMixin):
         system_prompt = dedent(
             """
             You decide trades for the day based on research scores and current holdings.
-            Respond in JSON with keys:
-              - summary (string)
-              - trades (list of objects with kind ['buy'|'sell'], symbol, shares (float), reason)
-            Only propose trades that can be funded with available cash and avoid fractional sells beyond holdings.
+            Provide a concise summary and recommended trades that respect available cash and
+            avoid fractional sells beyond existing holdings.
             """
         )
         user_prompt = dedent(
@@ -476,10 +529,35 @@ class DeciderAgent(LLMAgentMixin):
             "trades": fallback_trades,
         }
 
+        decider_schema = {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "trades": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"type": "string", "enum": ["buy", "sell"]},
+                            "symbol": {"type": "string"},
+                            "shares": {"type": "number"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["kind", "symbol", "shares"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["summary", "trades"],
+            "additionalProperties": False,
+        }
+
         result, raw_response = self._call_llm_json(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             fallback=fallback,
+            schema_name="DeciderTrades",
+            response_schema=decider_schema,
             temperature=0.2,
         )
 
@@ -634,9 +712,8 @@ class CheckerAgent(LLMAgentMixin):
         system_prompt = dedent(
             """
             You are the checker agent summarising the day's activity.
-            Produce JSON with keys: summary (string), requests (list of strings), history_entry (string),
-            memo_update (string for memo latest summary), and public_report (string for CLI output).
-            Use provided portfolio state and outcomes.
+            Use the provided portfolio state and outcomes to craft a daily summary, any
+            outstanding requests, memo updates, and a public report suitable for the CLI output.
             """
         )
         user_prompt = dedent(
@@ -671,10 +748,34 @@ class CheckerAgent(LLMAgentMixin):
             "public_report": fallback_summary,
         }
 
+        checker_schema = {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "requests": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "history_entry": {"type": "string"},
+                "memo_update": {"type": "string"},
+                "public_report": {"type": "string"},
+            },
+            "required": [
+                "summary",
+                "requests",
+                "history_entry",
+                "memo_update",
+                "public_report",
+            ],
+            "additionalProperties": False,
+        }
+
         result, raw_response = self._call_llm_json(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             fallback=fallback,
+            schema_name="CheckerDailySummary",
+            response_schema=checker_schema,
             temperature=0.15,
         )
 
