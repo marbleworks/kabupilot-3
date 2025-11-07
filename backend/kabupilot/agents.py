@@ -20,7 +20,12 @@ from .knowledge import (
     symbols_from_memo,
     update_knowledge_memo,
 )
-from .llm import ChatMessage, LLMProviderError, SupportsLLMGenerate
+from .llm import (
+    ChatMessage,
+    LLMProviderError,
+    OpenAIWithGrokToolProvider,
+    SupportsLLMGenerate,
+)
 from .models import ActivityLog, ExplorerFinding, Goal, ResearchFinding, Transaction
 from .repository import PortfolioRepository
 
@@ -312,6 +317,9 @@ class ResearcherAgent(LLMAgentMixin):
         if self.grok_provider is None:
             return None
 
+        if isinstance(self.grok_provider, OpenAIWithGrokToolProvider):
+            raise RuntimeError("Direct Grok queries are not supported with the tool provider")
+
         system_prompt = dedent(
             """
             You are Grok from xAI acting as an external research tool.
@@ -350,6 +358,9 @@ class ResearcherAgent(LLMAgentMixin):
         if self.knowledge:
             context = find_symbol_context(symbol, self.knowledge)
             knowledge_context = context or self.knowledge.content[:1000]
+
+        if isinstance(self.grok_provider, OpenAIWithGrokToolProvider):
+            return self._score_with_grok_tool(symbol, knowledge_context)
 
         grok_research = self._query_grok(symbol, knowledge_context)
 
@@ -396,6 +407,70 @@ class ResearcherAgent(LLMAgentMixin):
         finding = ResearchFinding(symbol=symbol.upper(), score=round(score, 3), rationale=rationale)
 
         LOGGER.debug("Researcher result for %s: %s", symbol, result)
+
+        return finding
+
+    def _score_with_grok_tool(self, symbol: str, knowledge_context: str) -> ResearchFinding:
+        assert isinstance(self.grok_provider, OpenAIWithGrokToolProvider)
+
+        grok_system_prompt = dedent(
+            """
+            You are Grok from xAI acting as an external research assistant.
+            Return at most five bullet points highlighting timely catalysts, risks, or valuation notes.
+            Focus on factual developments that would aid an equity analyst.
+            """
+        ).strip()
+
+        system_prompt = dedent(
+            """
+            You are the primary equity analyst for an autonomous portfolio manager.
+            When you need fresh market intelligence, call the grok_search tool to consult xAI Grok.
+            After reviewing all context, respond with a JSON object containing keys:
+            score (float between 0 and 1) and rationale (string).
+            Integrate insights from both the shared memo and any Grok findings.
+            """
+        )
+        user_prompt = dedent(
+            f"""
+            Symbol: {symbol.upper()}
+            Shared memo context:\n{knowledge_context or '(no memo excerpts available)'}
+            Evaluate the current attractiveness of the name and summarise the thesis.
+            """
+        )
+
+        fallback_score = 0.55 + (abs(hash(symbol)) % 30) / 100
+        fallback = {
+            "score": min(1.0, round(fallback_score, 3)),
+            "rationale": knowledge_context
+            or f"Baseline attractiveness applied for {symbol}; limited contextual insight available.",
+        }
+
+        try:
+            raw = self.grok_provider.generate(
+                [
+                    ChatMessage("system", system_prompt.strip()),
+                    ChatMessage("user", user_prompt.strip()),
+                ],
+                temperature=0.4,
+                grok_system_prompt=grok_system_prompt,
+                grok_temperature=0.2,
+            )
+            result = _extract_json_dict(raw)
+        except (LLMProviderError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.warning("Tool-enabled research failed for %s: %s", symbol, exc)
+            result = fallback
+
+        try:
+            score = float(result.get("score", fallback["score"]))
+        except (TypeError, ValueError):
+            score = float(fallback["score"])
+        score = max(0.0, min(1.0, score))
+
+        rationale = str(result.get("rationale") or fallback["rationale"])
+
+        finding = ResearchFinding(symbol=symbol.upper(), score=round(score, 3), rationale=rationale)
+
+        LOGGER.debug("Researcher tool result for %s: %s", symbol, result)
 
         return finding
 

@@ -23,7 +23,13 @@ from .agents import (
 from .config import get_database_path
 from .db import initialize_database
 from .knowledge import ensure_seed_knowledge, load_knowledge_base
-from .llm import LLMProviderError, OpenAIChatProvider, SupportsLLMGenerate, XAIChatProvider
+from .llm import (
+    LLMProviderError,
+    OpenAIChatProvider,
+    OpenAIWithGrokToolProvider,
+    SupportsLLMGenerate,
+    XAIChatProvider,
+)
 from .models import WatchlistEntry
 from .repository import PortfolioRepository
 
@@ -57,6 +63,24 @@ def _create_gpt_provider() -> SupportsLLMGenerate:
     model = os.environ.get("KABUPILOT_OPENAI_MODEL", "gpt-4o-mini")
     organisation = os.environ.get("OPENAI_ORG")
     return OpenAIChatProvider(model=model, organisation=organisation)
+
+
+def _create_grok_tool_provider() -> SupportsLLMGenerate | None:
+    try:
+        model = os.environ.get(
+            "KABUPILOT_OPENAI_TOOL_MODEL",
+            os.environ.get("KABUPILOT_OPENAI_MODEL", "gpt-4.1"),
+        )
+        grok_model = os.environ.get("KABUPILOT_XAI_MODEL", "grok-4")
+        organisation = os.environ.get("OPENAI_ORG")
+        return OpenAIWithGrokToolProvider(
+            model=model,
+            organisation=organisation,
+            grok_model=grok_model,
+        )
+    except LLMProviderError as exc:
+        LOGGER.warning("OpenAI Grok tool provider unavailable: %s", exc)
+        return None
 
 
 def _create_grok_provider() -> SupportsLLMGenerate | None:
@@ -129,7 +153,7 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
     market = repository.get_market()
     knowledge = load_knowledge_base(market, database_path=args.db_path)
     provider = _create_gpt_provider()
-    grok_provider = _create_grok_provider()
+    grok_provider = _create_grok_tool_provider() or _create_grok_provider()
     explorer = ExplorerAgent(repository, provider, knowledge)
     researcher = ResearcherAgent(provider, knowledge, grok_provider)
     leader = ResearchLeaderAgent(researcher)
