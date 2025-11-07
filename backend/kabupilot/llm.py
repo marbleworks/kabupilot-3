@@ -87,7 +87,12 @@ class OpenAIChatProvider(SupportsLLMGenerate):
         if enable_web_search is None:
             enable_web_search = _env_flag("KABUPILOT_OPENAI_WEB_SEARCH", default=True)
         self._tools: tuple[Mapping[str, object], ...] | None = (
-            ({"type": "web_search"},)
+            (
+                {
+                    "type": "web_search",
+                    "name": "web_search",
+                },
+            )
             if enable_web_search
             else None
         )
