@@ -6,7 +6,7 @@ import argparse
 import json
 import logging
 import os
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Sequence
@@ -22,8 +22,15 @@ from .agents import (
 )
 from .config import get_database_path
 from .db import initialize_database
-from .knowledge import ensure_seed_knowledge, load_knowledge_base
-from .llm import LLMProviderError, OpenAIChatProvider, SupportsLLMGenerate, XAIChatProvider
+from .knowledge import KnowledgeMemo, ensure_seed_knowledge, load_knowledge_base
+from .llm import (
+    DEFAULT_OPENAI_CHAT_MODEL,
+    DEFAULT_XAI_GROK_MODEL,
+    LLMProviderError,
+    OpenAIChatProvider,
+    OpenAIWithGrokToolProvider,
+    SupportsLLMGenerate,
+)
 from .models import WatchlistEntry
 from .repository import PortfolioRepository
 
@@ -49,25 +56,48 @@ DEFAULT_WATCHLISTS: dict[str, Sequence[WatchlistEntry]] = {
 }
 
 
+@dataclass(frozen=True)
+class AgentContext:
+    repository: PortfolioRepository
+    market: str
+    knowledge: KnowledgeMemo
+    provider: SupportsLLMGenerate
+
+
 def _create_repository(db_path: str | Path | None) -> PortfolioRepository:
     return PortfolioRepository(db_path)
 
 
 def _create_gpt_provider() -> SupportsLLMGenerate:
-    model = os.environ.get("KABUPILOT_OPENAI_MODEL", "gpt-4o-mini")
+    model = os.environ.get("KABUPILOT_OPENAI_MODEL", DEFAULT_OPENAI_CHAT_MODEL)
     organisation = os.environ.get("OPENAI_ORG")
     return OpenAIChatProvider(model=model, organisation=organisation)
 
 
-def _create_grok_provider() -> SupportsLLMGenerate | None:
+def _create_grok_tool_provider() -> SupportsLLMGenerate | None:
     try:
-        model = os.environ.get("KABUPILOT_XAI_MODEL", "grok-beta")
-        return XAIChatProvider(model=model)
+        model = os.environ.get(
+            "KABUPILOT_OPENAI_TOOL_MODEL",
+            os.environ.get("KABUPILOT_OPENAI_MODEL", DEFAULT_OPENAI_CHAT_MODEL),
+        )
+        grok_model = os.environ.get("KABUPILOT_XAI_MODEL", DEFAULT_XAI_GROK_MODEL)
+        organisation = os.environ.get("OPENAI_ORG")
+        return OpenAIWithGrokToolProvider(
+            model=model,
+            organisation=organisation,
+            grok_model=grok_model,
+        )
     except LLMProviderError as exc:
-        LOGGER.warning("Grok provider unavailable: %s", exc)
+        LOGGER.warning("OpenAI Grok tool provider unavailable: %s", exc)
         return None
 
 
+def _prepare_agent_context(args: argparse.Namespace) -> AgentContext:
+    repository = _create_repository(args.db_path)
+    market = repository.get_market()
+    knowledge = load_knowledge_base(market, database_path=args.db_path)
+    provider = _create_gpt_provider()
+    return AgentContext(repository, market, knowledge, provider)
 def cmd_init_db(args: argparse.Namespace) -> None:
     db_path = initialize_database(args.db_path, force=args.force)
     repository = _create_repository(db_path)
@@ -114,29 +144,27 @@ def cmd_show_portfolio(args: argparse.Namespace) -> None:
 
 
 def cmd_run_planner(args: argparse.Namespace) -> None:
-    repository = _create_repository(args.db_path)
-    market = repository.get_market()
-    knowledge = load_knowledge_base(market, database_path=args.db_path)
-    provider = _create_gpt_provider()
-    planner = PlannerAgent(repository, provider, knowledge)
+    context = _prepare_agent_context(args)
+    planner = PlannerAgent(context.repository, context.provider, context.knowledge)
     goal = planner.run(args.week_start)
     print("Planner goal recorded:\n")
     print(goal.content)
 
 
 def cmd_run_daily(args: argparse.Namespace) -> None:
-    repository = _create_repository(args.db_path)
-    market = repository.get_market()
-    knowledge = load_knowledge_base(market, database_path=args.db_path)
-    provider = _create_gpt_provider()
-    grok_provider = _create_grok_provider()
-    explorer = ExplorerAgent(repository, provider, knowledge)
-    researcher = ResearcherAgent(provider, knowledge, grok_provider)
+    context = _prepare_agent_context(args)
+    grok_provider = _create_grok_tool_provider()
+    if not isinstance(grok_provider, OpenAIWithGrokToolProvider):
+        raise SystemExit(
+            "OpenAIWithGrokToolProvider is required for Grok-integrated explorer and researcher agents."
+        )
+    explorer = ExplorerAgent(context.repository, context.provider, context.knowledge, grok_provider)
+    researcher = ResearcherAgent(context.provider, context.knowledge, grok_provider)
     leader = ResearchLeaderAgent(researcher)
-    decider = DeciderAgent(repository, provider, knowledge)
-    updater = PortfolioUpdaterAgent(explorer, leader, decider, repository)
+    decider = DeciderAgent(context.repository, context.provider, context.knowledge)
+    updater = PortfolioUpdaterAgent(explorer, leader, decider, context.repository)
 
-    print(f"Running daily portfolio update for market '{market}'...\n")
+    print(f"Running daily portfolio update for market '{context.market}'...\n")
     result = updater.run()
 
     print("Explorer suggested symbols:")
@@ -170,11 +198,8 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
 
 
 def cmd_update_memo(args: argparse.Namespace) -> None:
-    repository = _create_repository(args.db_path)
-    market = repository.get_market()
-    knowledge = load_knowledge_base(market, database_path=args.db_path)
-    provider = _create_gpt_provider()
-    checker = CheckerAgent(repository, provider, knowledge, args.db_path)
+    context = _prepare_agent_context(args)
+    checker = CheckerAgent(context.repository, context.provider, context.knowledge, args.db_path)
 
     daily_result = None
     if args.result_path:
