@@ -130,14 +130,13 @@ class LLMAgentMixin:
         *,
         system_prompt: str,
         user_prompt: str,
-        temperature: float = 0.2,
         **options: object,
     ) -> str:
         messages = [
             ChatMessage("system", system_prompt.strip()),
             ChatMessage("user", user_prompt.strip()),
         ]
-        return self.provider.generate(messages, temperature=temperature, **options)
+        return self.provider.generate(messages, **options)
 
     def _call_llm_json(
         self,
@@ -147,7 +146,6 @@ class LLMAgentMixin:
         fallback: dict[str, object],
         schema_name: str,
         response_schema: dict[str, object],
-        temperature: float = 0.2,
         **options: object,
     ) -> tuple[dict[str, object], str | None]:
         try:
@@ -162,7 +160,6 @@ class LLMAgentMixin:
             raw = self._call_llm(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                temperature=temperature,
                 text=text_options,
                 **options,
             )
@@ -241,7 +238,6 @@ class PlannerAgent(LLMAgentMixin):
             fallback=fallback,
             schema_name="PlannerGoal",
             response_schema=plan_schema,
-            temperature=0.15,
         )
 
         content_lines = [
@@ -362,9 +358,7 @@ class ExplorerAgent(LLMAgentMixin):
                     ChatMessage("system", system_prompt.strip()),
                     ChatMessage("user", user_prompt.strip()),
                 ],
-                temperature=0.3,
                 grok_system_prompt=grok_system_prompt,
-                grok_temperature=0.2,
                 text=text_options,
             )
             parsed = json.loads(raw_response)
@@ -467,9 +461,7 @@ class ResearcherAgent(LLMAgentMixin):
                     ChatMessage("system", system_prompt.strip()),
                     ChatMessage("user", user_prompt.strip()),
                 ],
-                temperature=0.4,
                 grok_system_prompt=grok_system_prompt,
-                grok_temperature=0.2,
                 text=text_options,
             )
             result = json.loads(raw)
@@ -586,7 +578,6 @@ class DeciderAgent(LLMAgentMixin):
             fallback=fallback,
             schema_name="DeciderTrades",
             response_schema=decider_schema,
-            temperature=0.2,
         )
 
         trades: list[Transaction] = []
@@ -804,7 +795,6 @@ class CheckerAgent(LLMAgentMixin):
             fallback=fallback,
             schema_name="CheckerDailySummary",
             response_schema=checker_schema,
-            temperature=0.15,
         )
 
         memo_summary = str(result.get("memo_update") or fallback["memo_update"])
