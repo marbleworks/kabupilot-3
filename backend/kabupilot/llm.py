@@ -176,6 +176,40 @@ class OpenAIChatProvider(SupportsLLMGenerate):
         return output_text
 
 
+def _extract_xai_text(content: object) -> str | None:
+    """Normalise xAI's chat message content into a plain string."""
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, Sequence) and not isinstance(content, (str, bytes, bytearray)):
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, Mapping):
+                continue
+            block_type = block.get("type")
+            text_value = block.get("text")
+            if isinstance(text_value, Mapping):
+                nested = text_value.get("value")
+                if isinstance(nested, str):
+                    parts.append(nested)
+                    continue
+            if isinstance(text_value, str):
+                parts.append(text_value)
+                continue
+            if block_type in {"text", "output_text"}:
+                if isinstance(text_value, str):
+                    parts.append(text_value)
+                    continue
+            data = block.get("content") if block_type == "output_text" else None
+            if isinstance(data, str):
+                parts.append(data)
+        if parts:
+            return "".join(parts)
+
+    return None
+
+
 class XAIChatProvider(SupportsLLMGenerate):
     """Simple HTTP client for the xAI (Grok) API."""
 
@@ -241,10 +275,10 @@ class XAIChatProvider(SupportsLLMGenerate):
         message = first.get("message") if isinstance(first, dict) else None
         if not isinstance(message, dict):
             raise LLMProviderError("xAI API response missing message field")
-        content = message.get("content")
+        content = _extract_xai_text(message.get("content"))
         if not content:
             raise LLMProviderError("xAI API returned an empty message content")
-        return str(content)
+        return content
 
 
 class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
@@ -343,9 +377,12 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
             raise LLMProviderError("Failed to decode response from xAI Grok API") from exc
 
         try:
-            return str(data["choices"][0]["message"]["content"])
+            content = _extract_xai_text(data["choices"][0]["message"]["content"])
         except (KeyError, IndexError, TypeError) as exc:  # pragma: no cover - defensive
             raise LLMProviderError("Malformed response from xAI Grok API") from exc
+        if not content:
+            raise LLMProviderError("xAI Grok API returned an empty message content")
+        return content
 
     def _parse_tool_arguments(self, arguments: object) -> Mapping[str, object]:
         if arguments is None:
