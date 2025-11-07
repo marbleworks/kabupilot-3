@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -587,64 +588,140 @@ class DeciderAgent(LLMAgentMixin):
         trades: list[Transaction] = []
         available_cash = snapshot.cash_balance
         current_positions = {pos.symbol: pos.shares for pos in snapshot.positions}
+        market = self.repository.get_market()
+        lot_size = 100 if market == "jp" else 1
+
+        LOGGER.debug(
+            "Applying lot size %s for market %s when evaluating trades", lot_size, market
+        )
+
+        def _round_to_lot(value: float) -> int:
+            integer = math.floor(value + 1e-6)
+            if lot_size > 1:
+                integer = (integer // lot_size) * lot_size
+            return max(integer, 0)
+
+        default_reason = str(result.get("summary", ""))
+
+        def _process_trade(
+            kind: str,
+            symbol: str,
+            requested_shares: object,
+            reason: str,
+        ) -> Transaction | None:
+            nonlocal available_cash
+
+            symbol = symbol.upper()
+            kind = kind.lower()
+            if kind not in {"buy", "sell"} or not symbol:
+                return None
+
+            try:
+                requested = float(requested_shares)
+            except (TypeError, ValueError):
+                return None
+            if requested <= 0:
+                return None
+
+            price = lookup_price(symbol)
+            if price <= 0:
+                LOGGER.debug("Skipping %s %s; non-positive price %s", kind, symbol, price)
+                return None
+
+            reason_text = reason or default_reason
+
+            if kind == "buy":
+                max_affordable = math.floor(available_cash / price)
+                if lot_size > 1:
+                    max_affordable = (max_affordable // lot_size) * lot_size
+                if max_affordable <= 0:
+                    LOGGER.debug(
+                        "Skipping buy %s; insufficient cash %.2f for price %.2f",
+                        symbol,
+                        available_cash,
+                        price,
+                    )
+                    return None
+
+                desired = _round_to_lot(requested) if lot_size > 1 else math.floor(requested)
+                if desired <= 0:
+                    LOGGER.debug("Skipping buy %s; below lot requirement", symbol)
+                    return None
+                shares = min(desired, max_affordable)
+                if shares <= 0:
+                    return None
+
+                step = lot_size if lot_size > 1 else 1
+                cost = shares * price
+                while shares > 0 and cost > available_cash + 1e-6:
+                    shares -= step
+                    cost = shares * price
+                if shares <= 0:
+                    LOGGER.debug("Skipping buy %s after affordability adjustment", symbol)
+                    return None
+                available_cash -= cost
+            else:
+                owned = current_positions.get(symbol, 0.0)
+                if owned <= 0:
+                    LOGGER.debug("Skipping sell %s; no existing position", symbol)
+                    return None
+
+                owned_int = math.floor(owned + 1e-6)
+                desired = math.floor(requested + 1e-6)
+                if lot_size > 1 and owned_int >= lot_size:
+                    max_sell = (owned_int // lot_size) * lot_size
+                    desired = min(desired, max_sell)
+                    desired = (desired // lot_size) * lot_size
+                else:
+                    desired = min(desired, owned_int)
+
+                if desired <= 0:
+                    LOGGER.debug("Skipping sell %s; below tradable quantity", symbol)
+                    return None
+
+                shares = desired
+                current_positions[symbol] = owned - shares
+                available_cash += shares * price
+
+            LOGGER.debug(
+                "Accepted trade %s %s x %s @ %.2f (cash remaining %.2f)",
+                kind,
+                symbol,
+                shares,
+                price,
+                available_cash,
+            )
+            return Transaction(
+                kind=kind,
+                symbol=symbol,
+                shares=float(shares),
+                price=price,
+                reason=reason_text,
+            )
 
         for item in result.get("trades", []):
             if not isinstance(item, dict):
                 continue
-            kind = str(item.get("kind", "")).lower()
-            symbol = str(item.get("symbol", "")).upper()
-            if kind not in {"buy", "sell"} or not symbol:
-                continue
-            try:
-                shares = float(item.get("shares", 0.0))
-            except (TypeError, ValueError):
-                continue
-            if shares <= 0:
-                continue
-            price = lookup_price(symbol)
-            if kind == "buy":
-                max_affordable = available_cash / price if price > 0 else 0
-                if max_affordable <= 0:
-                    continue
-                shares = min(shares, max(0.0, max_affordable))
-                if shares < 1e-6:
-                    continue
-                available_cash -= shares * price
-            else:
-                owned = current_positions.get(symbol, 0.0)
-                if owned <= 0:
-                    continue
-                shares = min(shares, owned)
-                current_positions[symbol] = owned - shares
-            trades.append(
-                Transaction(
-                    kind=kind,
-                    symbol=symbol,
-                    shares=round(shares, 4),
-                    price=price,
-                    reason=str(item.get("reason", result.get("summary", ""))),
-                )
+            trade = _process_trade(
+                kind=str(item.get("kind", "")),
+                symbol=str(item.get("symbol", "")),
+                requested_shares=item.get("shares", 0.0),
+                reason=str(item.get("reason", default_reason)),
             )
+            if trade:
+                trades.append(trade)
 
         if not trades and fallback_trades:
             for fallback_trade in fallback_trades:
-                symbol = str(fallback_trade["symbol"]).upper()
-                price = lookup_price(symbol)
-                shares = float(fallback_trade.get("shares", 0.0))
-                if shares <= 0:
-                    continue
-                if shares * price > available_cash:
-                    continue
-                trades.append(
-                    Transaction(
-                        kind=str(fallback_trade.get("kind", "buy")),
-                        symbol=symbol,
-                        shares=round(shares, 4),
-                        price=price,
-                        reason=str(fallback_trade.get("reason", "Fallback action")),
-                    )
+                trade = _process_trade(
+                    kind=str(fallback_trade.get("kind", "buy")),
+                    symbol=str(fallback_trade.get("symbol", "")),
+                    requested_shares=fallback_trade.get("shares", 0.0),
+                    reason=str(fallback_trade.get("reason", "Fallback action")),
                 )
-                break
+                if trade:
+                    trades.append(trade)
+                    break
 
         if trades:
             summary = result.get("summary") or fallback.get("summary", "Decider trades executed")

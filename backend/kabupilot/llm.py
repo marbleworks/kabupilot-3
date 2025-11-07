@@ -456,14 +456,6 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
         raise LLMProviderError("Unsupported Grok tool arguments type")
 
     def _iter_tool_calls(self, response: object) -> Iterable[tuple[str, object]]:
-        output_items = getattr(response, "output", None)
-        if not output_items:
-            mapping = _as_mapping(response)
-            if mapping:
-                output_items = mapping.get("output")
-        if not output_items:
-            return []
-
         calls: list[tuple[str, object]] = []
 
         def _capture_call(candidate: object) -> None:
@@ -471,18 +463,14 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
             if not candidate_map:
                 return
 
-            block_type = candidate_map.get("type") or getattr(candidate, "type", None)
-            if block_type != "tool_call":
-                return
+            function = candidate_map.get("function")
+            if function and not isinstance(function, Mapping):
+                function = _as_mapping(function)
 
             name = (
                 candidate_map.get("name")
                 or candidate_map.get("tool_name")
-                or (
-                    candidate_map.get("function", {}).get("name")
-                    if isinstance(candidate_map.get("function"), Mapping)
-                    else None
-                )
+                or (function.get("name") if isinstance(function, Mapping) else None)
                 or getattr(candidate, "name", None)
                 or getattr(candidate, "tool_name", None)
             )
@@ -493,6 +481,7 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
                 candidate_map.get("id")
                 or candidate_map.get("call_id")
                 or candidate_map.get("tool_call_id")
+                or (function.get("id") if isinstance(function, Mapping) else None)
                 or getattr(candidate, "id", None)
                 or getattr(candidate, "call_id", None)
                 or getattr(candidate, "tool_call_id", None)
@@ -505,10 +494,10 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
                 or candidate_map.get("input")
                 or candidate_map.get("tool_input")
             )
-            function = candidate_map.get("function")
-            if arguments is None and isinstance(function, Mapping):
+            if isinstance(function, Mapping):
                 arguments = (
-                    function.get("arguments")
+                    arguments
+                    or function.get("arguments")
                     or function.get("input")
                     or function.get("tool_input")
                 )
@@ -519,7 +508,39 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
                     or getattr(candidate, "tool_input", None)
                 )
 
+            LOGGER.debug("Captured Grok tool call %s", call_id)
             calls.append((str(call_id), arguments))
+
+        required_action = getattr(response, "required_action", None)
+        if required_action:
+            action_map = _as_mapping(required_action) or {}
+            action_type = action_map.get("type") or getattr(required_action, "type", None)
+            if action_type == "submit_tool_outputs":
+                submit = action_map.get("submit_tool_outputs") or getattr(
+                    required_action, "submit_tool_outputs", None
+                )
+                submit_map = _as_mapping(submit)
+                tool_calls = None
+                if submit_map:
+                    tool_calls = submit_map.get("tool_calls")
+                elif submit is not None:
+                    tool_calls = getattr(submit, "tool_calls", None)
+                if isinstance(tool_calls, Sequence) and not isinstance(
+                    tool_calls, (str, bytes, bytearray)
+                ):
+                    for call in tool_calls:
+                        _capture_call(call)
+
+        if calls:
+            return calls
+
+        output_items = getattr(response, "output", None)
+        if not output_items:
+            mapping = _as_mapping(response)
+            if mapping:
+                output_items = mapping.get("output")
+        if not output_items:
+            return []
 
         for item in output_items:
             item_map = _as_mapping(item)
@@ -527,7 +548,7 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
                 item_map.get("type") if item_map else getattr(item, "type", None)
             )
 
-            if container_type == "tool_call":
+            if container_type in {"tool_call", "tool_use"}:
                 _capture_call(item)
                 continue
 
