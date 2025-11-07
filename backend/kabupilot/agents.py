@@ -130,14 +130,13 @@ class LLMAgentMixin:
         *,
         system_prompt: str,
         user_prompt: str,
-        temperature: float = 0.2,
         **options: object,
     ) -> str:
         messages = [
             ChatMessage("system", system_prompt.strip()),
             ChatMessage("user", user_prompt.strip()),
         ]
-        return self.provider.generate(messages, temperature=temperature, **options)
+        return self.provider.generate(messages, **options)
 
     def _call_llm_json(
         self,
@@ -147,23 +146,21 @@ class LLMAgentMixin:
         fallback: dict[str, object],
         schema_name: str,
         response_schema: dict[str, object],
-        temperature: float = 0.2,
         **options: object,
     ) -> tuple[dict[str, object], str | None]:
         try:
-            response_format = {
-                "type": "json_schema",
-                "json_schema": {
+            text_options = {
+                "format": {
+                    "type": "json_schema",
                     "name": schema_name,
                     "schema": response_schema,
                     "strict": True,
-                },
+                }
             }
             raw = self._call_llm(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                temperature=temperature,
-                response_format=response_format,
+                text=text_options,
                 **options,
             )
             data = _extract_json_dict(raw)
@@ -241,7 +238,6 @@ class PlannerAgent(LLMAgentMixin):
             fallback=fallback,
             schema_name="PlannerGoal",
             response_schema=plan_schema,
-            temperature=0.15,
         )
 
         content_lines = [
@@ -347,13 +343,13 @@ class ExplorerAgent(LLMAgentMixin):
             """
         )
 
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
+        text_options = {
+            "format": {
+                "type": "json_schema",
                 "name": "ExplorerSuggestion",
                 "schema": explorer_schema,
                 "strict": True,
-            },
+            }
         }
 
         try:
@@ -362,10 +358,8 @@ class ExplorerAgent(LLMAgentMixin):
                     ChatMessage("system", system_prompt.strip()),
                     ChatMessage("user", user_prompt.strip()),
                 ],
-                temperature=0.3,
                 grok_system_prompt=grok_system_prompt,
-                grok_temperature=0.2,
-                response_format=response_format,
+                text=text_options,
             )
             parsed = json.loads(raw_response)
             if not isinstance(parsed, dict):
@@ -444,9 +438,9 @@ class ResearcherAgent(LLMAgentMixin):
             or f"Baseline attractiveness applied for {symbol}; limited contextual insight available.",
         }
 
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
+        text_options = {
+            "format": {
+                "type": "json_schema",
                 "name": "ResearchScore",
                 "schema": {
                     "type": "object",
@@ -458,7 +452,7 @@ class ResearcherAgent(LLMAgentMixin):
                     "additionalProperties": False,
                 },
                 "strict": True,
-            },
+            }
         }
 
         try:
@@ -467,10 +461,8 @@ class ResearcherAgent(LLMAgentMixin):
                     ChatMessage("system", system_prompt.strip()),
                     ChatMessage("user", user_prompt.strip()),
                 ],
-                temperature=0.4,
                 grok_system_prompt=grok_system_prompt,
-                grok_temperature=0.2,
-                response_format=response_format,
+                text=text_options,
             )
             result = json.loads(raw)
             if not isinstance(result, dict):
@@ -586,7 +578,6 @@ class DeciderAgent(LLMAgentMixin):
             fallback=fallback,
             schema_name="DeciderTrades",
             response_schema=decider_schema,
-            temperature=0.2,
         )
 
         trades: list[Transaction] = []
@@ -804,7 +795,6 @@ class CheckerAgent(LLMAgentMixin):
             fallback=fallback,
             schema_name="CheckerDailySummary",
             response_schema=checker_schema,
-            temperature=0.15,
         )
 
         memo_summary = str(result.get("memo_update") or fallback["memo_update"])

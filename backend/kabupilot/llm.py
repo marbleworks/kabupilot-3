@@ -43,8 +43,6 @@ class SupportsLLMGenerate(Protocol):
     def generate(
         self,
         messages: Sequence[ChatMessage],
-        *,
-        temperature: float | None = None,
         **options: object,
     ) -> str:
         ...
@@ -60,7 +58,7 @@ def _serialise_messages(messages: Iterable[ChatMessage]) -> list[Mapping[str, st
 class OpenAIChatProvider(SupportsLLMGenerate):
     """Wrapper around the official OpenAI Responses API client."""
 
-    _RESPONSES_ALLOWED_OPTIONS = {"max_output_tokens", "metadata", "response_format", "stop"}
+    _RESPONSES_ALLOWED_OPTIONS = {"max_output_tokens", "metadata", "stop", "text"}
 
     def __init__(
         self,
@@ -165,8 +163,6 @@ class OpenAIChatProvider(SupportsLLMGenerate):
     def generate(
         self,
         messages: Sequence[ChatMessage],
-        *,
-        temperature: float | None = None,
         **options: object,
     ) -> str:
         params: dict[str, object] = {
@@ -176,8 +172,6 @@ class OpenAIChatProvider(SupportsLLMGenerate):
                 for message in messages
             ],
         }
-        if temperature is not None:
-            params["temperature"] = float(temperature)
 
         if self._tools:
             params["tools"] = list(self._tools)
@@ -286,16 +280,12 @@ class XAIChatProvider(SupportsLLMGenerate):
     def generate(
         self,
         messages: Sequence[ChatMessage],
-        *,
-        temperature: float | None = None,
         **options: object,
     ) -> str:
         payload: dict[str, object] = {
             "model": self._model,
             "messages": _serialise_messages(messages),
         }
-        if temperature is not None:
-            payload["temperature"] = float(temperature)
         if self._tools:
             payload["tools"] = list(self._tools)
         if options:
@@ -330,7 +320,7 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
     """OpenAI Responses client that can call xAI Grok as an external tool."""
 
     _TOOL_NAME = "grok_search"
-    _RESPONSES_ALLOWED_OPTIONS = {"max_output_tokens", "metadata", "response_format", "stop"}
+    _RESPONSES_ALLOWED_OPTIONS = {"max_output_tokens", "metadata", "stop", "text"}
 
     def __init__(
         self,
@@ -394,7 +384,6 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
         *,
         query: str,
         system_prompt: str,
-        temperature: float | None,
         max_tokens: int | None,
     ) -> str:
         payload: dict[str, object] = {
@@ -404,8 +393,6 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
                 {"role": "user", "content": query},
             ],
         }
-        if temperature is not None:
-            payload["temperature"] = float(temperature)
         if max_tokens is not None:
             payload["max_tokens"] = int(max_tokens)
 
@@ -447,8 +434,6 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
     def generate(
         self,
         messages: Sequence[ChatMessage],
-        *,
-        temperature: float | None = None,
         **options: object,
     ) -> str:
         input_messages = [
@@ -458,13 +443,7 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
         grok_system_prompt = str(
             options.pop("grok_system_prompt", self._default_grok_system_prompt)
         )
-        grok_temperature = options.pop("grok_temperature", None)
         grok_max_tokens = options.pop("grok_max_tokens", None)
-        if grok_temperature is not None:
-            try:
-                grok_temperature = float(grok_temperature)
-            except (TypeError, ValueError) as exc:
-                raise LLMProviderError("grok_temperature must be numeric") from exc
         if grok_max_tokens is not None:
             try:
                 grok_max_tokens = int(grok_max_tokens)
@@ -495,9 +474,6 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
                 }
             ],
         }
-        if temperature is not None:
-            params["temperature"] = float(temperature)
-
         for key in list(options):
             if key in self._RESPONSES_ALLOWED_OPTIONS:
                 params[key] = options.pop(key)
@@ -531,7 +507,6 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
                 grok_response = self._call_grok(
                     query=query,
                     system_prompt=grok_system_prompt,
-                    temperature=grok_temperature,
                     max_tokens=grok_max_tokens,
                 )
                 tool_outputs.append({"tool_call_id": call_id, "output": grok_response})
