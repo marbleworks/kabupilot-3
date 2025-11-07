@@ -174,7 +174,7 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
     """OpenAI Responses client that can call xAI Grok as an external tool."""
 
     _TOOL_NAME = "grok_search"
-    _RESPONSES_ALLOWED_OPTIONS = {"max_output_tokens", "metadata", "stop"}
+    _RESPONSES_ALLOWED_OPTIONS = {"max_output_tokens", "metadata", "response_format", "stop"}
 
     def __init__(
         self,

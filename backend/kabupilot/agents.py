@@ -358,6 +358,23 @@ class ResearcherAgent(LLMAgentMixin):
             or f"Baseline attractiveness applied for {symbol}; limited contextual insight available.",
         }
 
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "ResearchScore",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "score": {"type": "number"},
+                        "rationale": {"type": "string"},
+                    },
+                    "required": ["score", "rationale"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        }
+
         try:
             raw = self.grok_provider.generate(
                 [
@@ -367,8 +384,11 @@ class ResearcherAgent(LLMAgentMixin):
                 temperature=0.4,
                 grok_system_prompt=grok_system_prompt,
                 grok_temperature=0.2,
+                response_format=response_format,
             )
-            result = _extract_json_dict(raw)
+            result = json.loads(raw)
+            if not isinstance(result, dict):
+                raise ValueError("LLM response did not contain a JSON object")
         except (LLMProviderError, ValueError, json.JSONDecodeError) as exc:
             LOGGER.warning("Tool-enabled research failed for %s: %s", symbol, exc)
             result = fallback
