@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+import logging
 from typing import Iterable, Literal, Mapping, MutableMapping, Protocol, Sequence
 
 
 DEFAULT_OPENAI_CHAT_MODEL = "gpt-5"
 DEFAULT_XAI_GROK_MODEL = "grok-4-fast-reasoning"
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -55,6 +59,90 @@ def _serialise_messages(messages: Iterable[ChatMessage]) -> list[Mapping[str, st
     return serialised
 
 
+def _as_mapping(value: object) -> Mapping[str, object] | None:
+    if isinstance(value, Mapping):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump()
+        except Exception:  # pragma: no cover - defensive
+            return None
+        if isinstance(dumped, Mapping):
+            return dumped
+    dict_method = getattr(value, "dict", None)
+    if callable(dict_method):  # pragma: no cover - compatibility
+        try:
+            dumped = dict_method()
+        except Exception:
+            return None
+        if isinstance(dumped, Mapping):
+            return dumped
+    return None
+
+
+def _extract_openai_output_text(response: object) -> str | None:
+    output_text = getattr(response, "output_text", None)
+    if output_text:
+        return str(output_text)
+
+    output_items = getattr(response, "output", None)
+    if not output_items:
+        mapping = _as_mapping(response)
+        if mapping:
+            output_items = mapping.get("output")
+    if not output_items:
+        return None
+
+    text_parts: list[str] = []
+    for item in output_items:
+        item_map = _as_mapping(item)
+        if not item_map:
+            item_type = getattr(item, "type", None)
+            if item_type != "message":
+                continue
+            contents = getattr(item, "content", None) or []
+        else:
+            item_type = item_map.get("type")
+            if item_type != "message":
+                continue
+            contents = item_map.get("content") or []
+
+        for block in contents:
+            block_map = _as_mapping(block)
+            block_type = None
+            if block_map:
+                block_type = block_map.get("type")
+                if block_type == "output_text":
+                    text = block_map.get("text")
+                    if text:
+                        text_parts.append(str(text))
+                    continue
+                if block_type == "text":
+                    text = block_map.get("text")
+                    if isinstance(text, Mapping):
+                        value = text.get("value")
+                        if value:
+                            text_parts.append(str(value))
+                    elif text:
+                        text_parts.append(str(text))
+                    continue
+
+            block_type = block_type or getattr(block, "type", None)
+            if block_type == "output_text":
+                text_value = getattr(block, "text", None)
+                if text_value:
+                    text_parts.append(str(text_value))
+                continue
+            if block_type == "text":
+                text_obj = getattr(block, "text", None)
+                value = getattr(text_obj, "value", None)
+                if value:
+                    text_parts.append(str(value))
+
+    return "".join(text_parts) if text_parts else None
+
+
 class OpenAIChatProvider(SupportsLLMGenerate):
     """Wrapper around the official OpenAI Responses API client."""
 
@@ -92,74 +180,6 @@ class OpenAIChatProvider(SupportsLLMGenerate):
             else None
         )
 
-    def _extract_output_text(self, response: object) -> str | None:
-        output_text = getattr(response, "output_text", None)
-        if output_text:
-            return str(output_text)
-
-        output_items = getattr(response, "output", None)
-        if not output_items:
-            return None
-
-        def _as_mapping(value: object) -> Mapping[str, object] | None:
-            if isinstance(value, Mapping):
-                return value
-            model_dump = getattr(value, "model_dump", None)
-            if callable(model_dump):
-                try:
-                    dumped = model_dump()
-                except Exception:  # pragma: no cover - defensive
-                    return None
-                if isinstance(dumped, Mapping):
-                    return dumped
-            return None
-
-        text_parts: list[str] = []
-        for item in output_items:
-            item_map = _as_mapping(item)
-            if not item_map:
-                item_type = getattr(item, "type", None)
-                if item_type != "message":
-                    continue
-                contents = getattr(item, "content", None) or []
-            else:
-                if item_map.get("type") != "message":
-                    continue
-                contents = item_map.get("content") or []
-
-            for block in contents:
-                block_map = _as_mapping(block)
-                block_type = None
-                if block_map:
-                    block_type = block_map.get("type")
-                    if block_type == "output_text":
-                        text = block_map.get("text")
-                        if text:
-                            text_parts.append(str(text))
-                        continue
-                    if block_type == "text":
-                        text = block_map.get("text")
-                        if isinstance(text, Mapping):
-                            value = text.get("value")
-                            if value:
-                                text_parts.append(str(value))
-                        elif text:
-                            text_parts.append(str(text))
-                        continue
-
-                block_type = block_type or getattr(block, "type", None)
-                if block_type == "output_text":
-                    text_value = getattr(block, "text", None)
-                    if text_value:
-                        text_parts.append(str(text_value))
-                    continue
-                if block_type == "text":
-                    text_obj = getattr(block, "text", None)
-                    value = getattr(text_obj, "value", None)
-                    if value:
-                        text_parts.append(str(value))
-        return "".join(text_parts) if text_parts else None
-
     def generate(
         self,
         messages: Sequence[ChatMessage],
@@ -191,7 +211,7 @@ class OpenAIChatProvider(SupportsLLMGenerate):
         except Exception as exc:  # pragma: no cover - defensive
             raise LLMProviderError(f"OpenAI Responses API call failed: {exc}") from exc
 
-        output_text = self._extract_output_text(response)
+        output_text = _extract_openai_output_text(response)
         if not output_text:
             raise LLMProviderError("OpenAI Responses API returned no output text")
         return output_text
@@ -396,6 +416,9 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
         if max_tokens is not None:
             payload["max_tokens"] = int(max_tokens)
 
+        LOGGER.debug("Grok system prompt:\n%s", system_prompt.strip())
+        LOGGER.debug("Grok query:\n%s", query.strip())
+
         response = self._session.post(
             f"{self._grok_base}{self._grok_chat_path}", json=payload, timeout=self._grok_timeout
         )
@@ -414,6 +437,7 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
             raise LLMProviderError("Malformed response from xAI Grok API") from exc
         if not content:
             raise LLMProviderError("xAI Grok API returned an empty message content")
+        LOGGER.debug("Grok response:\n%s", content)
         return content
 
     def _parse_tool_arguments(self, arguments: object) -> Mapping[str, object]:
@@ -430,6 +454,115 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
                 raise LLMProviderError("Grok tool arguments must decode to an object")
             return parsed
         raise LLMProviderError("Unsupported Grok tool arguments type")
+
+    def _iter_tool_calls(self, response: object) -> Iterable[tuple[str, object]]:
+        calls: list[tuple[str, object]] = []
+
+        def _capture_call(candidate: object) -> None:
+            candidate_map = _as_mapping(candidate)
+            if not candidate_map:
+                return
+
+            function = candidate_map.get("function")
+            if function and not isinstance(function, Mapping):
+                function = _as_mapping(function)
+
+            name = (
+                candidate_map.get("name")
+                or candidate_map.get("tool_name")
+                or (function.get("name") if isinstance(function, Mapping) else None)
+                or getattr(candidate, "name", None)
+                or getattr(candidate, "tool_name", None)
+            )
+            if name != self._TOOL_NAME:
+                return
+
+            call_id = (
+                candidate_map.get("id")
+                or candidate_map.get("call_id")
+                or candidate_map.get("tool_call_id")
+                or (function.get("id") if isinstance(function, Mapping) else None)
+                or getattr(candidate, "id", None)
+                or getattr(candidate, "call_id", None)
+                or getattr(candidate, "tool_call_id", None)
+            )
+            if not call_id:
+                raise LLMProviderError("Grok tool call missing identifier")
+
+            arguments = (
+                candidate_map.get("arguments")
+                or candidate_map.get("input")
+                or candidate_map.get("tool_input")
+            )
+            if isinstance(function, Mapping):
+                arguments = (
+                    arguments
+                    or function.get("arguments")
+                    or function.get("input")
+                    or function.get("tool_input")
+                )
+            if arguments is None:
+                arguments = (
+                    getattr(candidate, "arguments", None)
+                    or getattr(candidate, "input", None)
+                    or getattr(candidate, "tool_input", None)
+                )
+
+            LOGGER.debug("Captured Grok tool call %s", call_id)
+            calls.append((str(call_id), arguments))
+
+        required_action = getattr(response, "required_action", None)
+        if required_action:
+            action_map = _as_mapping(required_action) or {}
+            action_type = action_map.get("type") or getattr(required_action, "type", None)
+            if action_type == "submit_tool_outputs":
+                submit = action_map.get("submit_tool_outputs") or getattr(
+                    required_action, "submit_tool_outputs", None
+                )
+                submit_map = _as_mapping(submit)
+                tool_calls = None
+                if submit_map:
+                    tool_calls = submit_map.get("tool_calls")
+                elif submit is not None:
+                    tool_calls = getattr(submit, "tool_calls", None)
+                if isinstance(tool_calls, Sequence) and not isinstance(
+                    tool_calls, (str, bytes, bytearray)
+                ):
+                    for call in tool_calls:
+                        _capture_call(call)
+
+        if calls:
+            return calls
+
+        output_items = getattr(response, "output", None)
+        if not output_items:
+            mapping = _as_mapping(response)
+            if mapping:
+                output_items = mapping.get("output")
+        if not output_items:
+            return []
+
+        for item in output_items:
+            item_map = _as_mapping(item)
+            container_type = (
+                item_map.get("type") if item_map else getattr(item, "type", None)
+            )
+
+            if container_type in {"tool_call", "tool_use"}:
+                _capture_call(item)
+                continue
+
+            if container_type != "message":
+                continue
+
+            content = item_map.get("content") if item_map else getattr(item, "content", None)
+            if not isinstance(content, Sequence) or isinstance(content, (str, bytes, bytearray)):
+                continue
+
+            for block in content:
+                _capture_call(block)
+
+        return calls
 
     def generate(
         self,
@@ -487,39 +620,34 @@ class OpenAIWithGrokToolProvider(SupportsLLMGenerate):
         except Exception as exc:  # pragma: no cover - defensive
             raise LLMProviderError(f"OpenAI Responses API call failed: {exc}") from exc
 
-        tool_calls = []
-        for item in getattr(initial, "output", []) or []:
-            if getattr(item, "type", None) == "tool_call" and getattr(item, "name", None) == self._TOOL_NAME:
-                tool_calls.append(item)
+        tool_calls = list(self._iter_tool_calls(initial))
 
         if tool_calls:
             tool_outputs = []
-            for call in tool_calls:
-                arguments = self._parse_tool_arguments(getattr(call, "arguments", None))
+            for call_id, raw_arguments in tool_calls:
+                arguments = self._parse_tool_arguments(raw_arguments)
                 query = str(arguments.get("query", ""))
                 if not query:
                     raise LLMProviderError("Grok tool was invoked without a query")
-                call_id = getattr(call, "id", None)
-                if not call_id:
-                    raise LLMProviderError("Grok tool call missing identifier")
                 grok_response = self._call_grok(
                     query=query,
                     system_prompt=grok_system_prompt,
                     max_tokens=grok_max_tokens,
                 )
+                LOGGER.debug("Submitting Grok tool output for call %s", call_id)
                 tool_outputs.append({"tool_call_id": call_id, "output": grok_response})
 
             try:
                 final = self._client.responses.submit_tool_outputs(
-                    initial.id, {"tool_outputs": tool_outputs}
+                    initial.id, tool_outputs=tool_outputs
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 raise LLMProviderError(
                     f"OpenAI Responses API submit_tool_outputs failed: {exc}"
                 ) from exc
-            output_text = getattr(final, "output_text", None)
+            output_text = _extract_openai_output_text(final)
         else:
-            output_text = getattr(initial, "output_text", None)
+            output_text = _extract_openai_output_text(initial)
 
         if not output_text:
             raise LLMProviderError("OpenAI Responses API returned no output text")
